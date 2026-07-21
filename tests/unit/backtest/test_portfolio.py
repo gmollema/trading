@@ -1,0 +1,213 @@
+"""Unit tests for trading_bot.backtest.portfolio.
+
+Covers position_size (cycle.entry_scan's risk-based sizing math) and
+manage_position's pre_breakeven -> post_breakeven exit state machine
+(cycle.manage_position, adapted to a bar-close simulation instead of a
+live poll). See tests/unit/cli/test_cycle.py for the live-bot equivalents
+these are ported from.
+"""
+
+import unittest
+
+from trading_bot.backtest import portfolio
+
+
+def make_exit_cfg(partial_trigger_R=0.75, breakeven_trigger_R=1.0, partial_profit_fraction=1 / 3):
+    return {
+        "partial_profit_trigger_R": partial_trigger_R,
+        "breakeven_trigger_R": breakeven_trigger_R,
+        "partial_profit_fraction": partial_profit_fraction,
+    }
+
+
+def make_pos(**overrides):
+    pos = {
+        "symbol": "AAPL",
+        "entry_price": 100.0,
+        "qty": 30,
+        "initial_stop": 95.0,
+        "current_stop_price": 95.0,
+        "state": "pre_breakeven",
+        "R": 5.0,
+    }
+    pos.update(overrides)
+    return pos
+
+
+class TestInitialStopFromLod(unittest.TestCase):
+    def test_one_percent_below_lod(self):
+        self.assertAlmostEqual(portfolio.initial_stop_from_lod(100.0), 99.0)
+
+
+class TestPositionSize(unittest.TestCase):
+    def test_risk_based_size_when_it_is_the_binding_constraint(self):
+        # risk_dollars = 100_000 * 1% = 1000; R = 100-95 = 5 -> size_by_risk = 200
+        # cap: 10% of 100_000 / 100 = 100 -> size_by_cap = 100 (binding)
+        size = portfolio.position_size(100_000, 1.0, 100.0, 95.0, 10.0)
+        self.assertEqual(size, 100)
+
+    def test_position_cap_binds_before_risk_size(self):
+        # risk_dollars = 100_000 * 1% = 1000; R = 100-99 = 1 -> size_by_risk = 1000
+        # cap: 10% of 100_000 / 100 = 100 -> binding
+        size = portfolio.position_size(100_000, 1.0, 100.0, 99.0, 10.0)
+        self.assertEqual(size, 100)
+
+    def test_non_positive_risk_returns_zero(self):
+        self.assertEqual(portfolio.position_size(100_000, 1.0, 100.0, 100.0, 10.0), 0)
+        self.assertEqual(portfolio.position_size(100_000, 1.0, 100.0, 105.0, 10.0), 0)
+
+    def test_floors_to_whole_shares(self):
+        # risk_dollars = 1000, R = 3 -> 333.33 -> floor 333; cap huge, not binding
+        size = portfolio.position_size(100_000, 1.0, 10.0, 7.0, 100.0)
+        self.assertEqual(size, 333)
+
+
+class TestOpenPosition(unittest.TestCase):
+    def test_shape_matches_cycle_new_pos(self):
+        pos = portfolio.open_position("AAPL", 100.0, 96.0, 50)
+
+        self.assertEqual(pos["symbol"], "AAPL")
+        self.assertEqual(pos["entry_price"], 100.0)
+        self.assertEqual(pos["qty"], 50)
+        self.assertAlmostEqual(pos["initial_stop"], 95.04)
+        self.assertAlmostEqual(pos["current_stop_price"], 95.04)
+        self.assertEqual(pos["state"], "pre_breakeven")
+        self.assertAlmostEqual(pos["R"], 100.0 - 95.04)
+
+
+class TestManagePositionStopOut(unittest.TestCase):
+    def test_low_at_or_below_stop_closes_full_position(self):
+        pos = make_pos()
+
+        updated, fills = portfolio.manage_position(pos, {"low": 94.5, "close": 96.0}, [96.0], make_exit_cfg())
+
+        self.assertIsNone(updated)
+        self.assertEqual(fills, [{"qty": 30, "price": 95.0, "reason": "stop"}])
+
+    def test_low_exactly_at_stop_triggers(self):
+        pos = make_pos(current_stop_price=95.0)
+
+        updated, fills = portfolio.manage_position(pos, {"low": 95.0, "close": 96.0}, [96.0], make_exit_cfg())
+
+        self.assertIsNone(updated)
+        self.assertEqual(fills[0]["reason"], "stop")
+
+    def test_low_above_stop_does_not_trigger(self):
+        pos = make_pos()
+
+        updated, fills = portfolio.manage_position(pos, {"low": 95.5, "close": 96.0}, [96.0], make_exit_cfg())
+
+        self.assertIsNotNone(updated)
+        self.assertEqual(fills, [])
+
+
+class TestManagePositionPartialProfit(unittest.TestCase):
+    def test_partial_taken_on_reaching_trigger(self):
+        pos = make_pos()  # entry=100, R=5 -> partial trigger @ 103.75
+
+        updated, fills = portfolio.manage_position(
+            pos, {"low": 99.0, "close": 103.75}, [99.0, 103.75], make_exit_cfg()
+        )
+
+        self.assertEqual(len(fills), 1)
+        self.assertEqual(fills[0]["reason"], "partial_profit")
+        self.assertEqual(fills[0]["qty"], 10)  # ceil(30/3)
+        self.assertEqual(updated["qty"], 20)
+        self.assertEqual(updated["state"], "post_breakeven_partial_done")
+        self.assertAlmostEqual(updated["current_stop_price"], 99.0)  # entry * 0.99, breakeven not yet reached
+
+    def test_fast_move_past_both_thresholds_gets_breakeven_stop(self):
+        pos = make_pos()  # breakeven @ 105.0
+
+        updated, fills = portfolio.manage_position(
+            pos, {"low": 99.0, "close": 105.5}, [99.0, 105.5], make_exit_cfg()
+        )
+
+        self.assertEqual(updated["state"], "post_breakeven_partial_done")
+        self.assertEqual(updated["current_stop_price"], 100.0)  # full entry, not the discounted 0.99x
+
+    def test_below_partial_trigger_state_unchanged(self):
+        pos = make_pos()
+
+        updated, fills = portfolio.manage_position(
+            pos, {"low": 99.0, "close": 102.0}, [99.0, 102.0], make_exit_cfg()
+        )
+
+        self.assertEqual(fills, [])
+        self.assertEqual(updated["state"], "pre_breakeven")
+        self.assertEqual(updated["qty"], 30)
+
+    def test_partial_fully_closes_when_fraction_rounds_up_to_full_qty(self):
+        pos = make_pos(qty=1)
+
+        updated, fills = portfolio.manage_position(
+            pos, {"low": 99.0, "close": 103.75}, [99.0, 103.75], make_exit_cfg()
+        )
+
+        self.assertIsNone(updated)
+        self.assertEqual(fills[0]["qty"], 1)
+
+
+class TestManagePositionBreakevenOnlyFallback(unittest.TestCase):
+    """Defensive elif branch: only reachable if breakeven_trigger_R < partial_profit_trigger_R."""
+
+    def test_breakeven_only_when_partial_trigger_is_higher(self):
+        pos = make_pos()
+        cfg = make_exit_cfg(partial_trigger_R=1.5, breakeven_trigger_R=1.0)
+
+        updated, fills = portfolio.manage_position(pos, {"low": 99.0, "close": 105.0}, [99.0, 105.0], cfg)
+
+        self.assertEqual(fills, [])
+        self.assertEqual(updated["state"], "post_breakeven_no_partial")
+        self.assertEqual(updated["current_stop_price"], 100.0)
+        self.assertEqual(updated["qty"], 30)
+
+
+class TestManagePositionTrailingStop(unittest.TestCase):
+    def _lows_with_swing_low(self, low_value):
+        # low_value must be lower than both neighboring pairs to register
+        # as a swing low (matches cycle.compute_swing_lows' strict '<').
+        return [110, 105, low_value, 105, 110]
+
+    def test_ratchet_applied_when_candidate_above_current_stop(self):
+        pos = make_pos(state="post_breakeven_partial_done", current_stop_price=99.0, qty=20)
+        lows = self._lows_with_swing_low(100.5)  # candidate stop = 100.49 > 99.0
+
+        updated, fills = portfolio.manage_position(pos, {"low": 105.0, "close": 110.0}, lows, make_exit_cfg())
+
+        self.assertEqual(fills, [])
+        self.assertAlmostEqual(updated["current_stop_price"], 100.49)
+
+    def test_stop_never_ratchets_down(self):
+        pos = make_pos(state="post_breakeven_partial_done", current_stop_price=101.0, qty=20)
+        lows = self._lows_with_swing_low(100.5)  # candidate 100.49 < current 101.0
+
+        updated, fills = portfolio.manage_position(pos, {"low": 105.0, "close": 110.0}, lows, make_exit_cfg())
+
+        self.assertEqual(fills, [])
+        self.assertEqual(updated["current_stop_price"], 101.0)  # unchanged
+
+    def test_no_swing_low_yet_leaves_stop_unchanged(self):
+        pos = make_pos(state="post_breakeven_no_partial", current_stop_price=100.0, qty=30)
+        lows = [110, 109, 108, 107, 106]  # monotonic -- no swing low
+
+        updated, fills = portfolio.manage_position(pos, {"low": 106.0, "close": 110.0}, lows, make_exit_cfg())
+
+        self.assertEqual(fills, [])
+        self.assertEqual(updated["current_stop_price"], 100.0)
+
+
+class TestClosePosition(unittest.TestCase):
+    def test_default_reason_is_force_close(self):
+        fill = portfolio.close_position(make_pos(qty=20), 105.0)
+
+        self.assertEqual(fill, {"qty": 20, "price": 105.0, "reason": "force_close"})
+
+    def test_custom_reason(self):
+        fill = portfolio.close_position(make_pos(qty=20), 105.0, reason="end_of_data")
+
+        self.assertEqual(fill["reason"], "end_of_data")
+
+
+if __name__ == "__main__":
+    unittest.main()

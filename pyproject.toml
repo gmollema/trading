@@ -1,0 +1,26 @@
+[project]
+name = "trading-bot"
+version = "0.1.0"
+description = "IBKR paper-trading bot"
+requires-python = ">=3.13"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+# Optional convenience commands, available after `pip install -e .`
+# (python -m trading_bot.cli.<name> always works too)
+[project.scripts]
+ht-bot = "trading_bot.cli.bot:main"
+ht-cycle = "trading_bot.cli.cycle:main"
+ht-trade = "trading_bot.cli.trade:main"
+ht-prefilter = "trading_bot.cli.morning_prefilter:main"
+ht-perf = "trading_bot.cli.compute_perf:main"
+ht-rotate-logs = "trading_bot.cli.rotate_logs:main"
+ht-close-one = "trading_bot.cli.close_one:main"
+ht-setup-schedule = "trading_bot.cli.setup_schedule:main"
+ht-cleanup-schedule = "trading_bot.cli.cleanup_schedule:main"
+ht-backtest = "trading_bot.cli.backtest:main"

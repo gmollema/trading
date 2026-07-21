@@ -1,0 +1,25 @@
+.env
+.venv/
+__pycache__/
+*.pyc
+*.egg-info/
+trades.csv
+logs/
+open_positions.json
+safety-check-log.json
+watchlist.txt
+backtest_data/
+
+# IDE / test cache / local Claude Code settings -- machine-specific, not shared
+.idea/
+.pytest_cache/
+.claude/
+
+# Generated live-trading dashboard (compute_perf.py writes this)
+dashboard/
+
+# Ad-hoc backtest/sweep experiment output at the project root -- scratch
+# artifacts from running scripts, not source; every *.csv/*.log at root
+# falls in this bucket (verified none exist under src/ or tests/)
+*.csv
+*.log
