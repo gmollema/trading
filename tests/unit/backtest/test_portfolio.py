@@ -39,6 +39,34 @@ class TestInitialStopFromLod(unittest.TestCase):
         self.assertAlmostEqual(portfolio.initial_stop_from_lod(100.0), 99.0)
 
 
+class TestCommission(unittest.TestCase):
+    def test_per_share_binds_above_minimum(self):
+        # 1000 shares @ $0.005/share = $5.00, above the $1.00 minimum.
+        self.assertAlmostEqual(portfolio.commission(1000, 0.005, 1.0), 5.0)
+
+    def test_minimum_binds_for_small_fills(self):
+        # 50 shares @ $0.005/share = $0.25, below the $1.00 minimum.
+        self.assertAlmostEqual(portfolio.commission(50, 0.005, 1.0), 1.0)
+
+    def test_defaults_match_ibkr_standard_schedule(self):
+        self.assertAlmostEqual(portfolio.commission(1000), 5.0)
+        self.assertAlmostEqual(portfolio.commission(1), 1.0)
+
+
+class TestFractionalCommission(unittest.TestCase):
+    def test_pct_of_notional_binds_above_minimum(self):
+        # 10 shares @ $50 = $500 notional; 1% = $5.00, above the $0.01 min.
+        self.assertAlmostEqual(portfolio.fractional_commission(10, 50.0, 0.01, 0.01), 5.0)
+
+    def test_minimum_binds_for_tiny_fractional_fills(self):
+        # 0.02 shares @ $10 = $0.20 notional; 1% = $0.002, below the $0.01 min.
+        self.assertAlmostEqual(portfolio.fractional_commission(0.02, 10.0, 0.01, 0.01), 0.01)
+
+    def test_defaults_match_ibkr_published_fractional_schedule(self):
+        self.assertAlmostEqual(portfolio.fractional_commission(10, 50.0), 5.0)
+        self.assertAlmostEqual(portfolio.fractional_commission(0.001, 10.0), 0.01)
+
+
 class TestPositionSize(unittest.TestCase):
     def test_risk_based_size_when_it_is_the_binding_constraint(self):
         # risk_dollars = 100_000 * 1% = 1000; R = 100-95 = 5 -> size_by_risk = 200
@@ -60,6 +88,18 @@ class TestPositionSize(unittest.TestCase):
         # risk_dollars = 1000, R = 3 -> 333.33 -> floor 333; cap huge, not binding
         size = portfolio.position_size(100_000, 1.0, 10.0, 7.0, 100.0)
         self.assertEqual(size, 333)
+
+    def test_allow_fractional_returns_raw_size(self):
+        # Same math as test_floors_to_whole_shares, but unrounded: 1000/3 = 333.33...
+        size = portfolio.position_size(100_000, 1.0, 10.0, 7.0, 100.0, allow_fractional=True)
+        self.assertAlmostEqual(size, 1000 / 3)
+
+    def test_allow_fractional_lets_a_tiny_account_size_a_pricey_stock(self):
+        # $1,000 account, 10% cap = $100 max position -- a $500 stock would
+        # floor to 0 whole shares, but 0.2 fractional shares is tradeable.
+        size = portfolio.position_size(1_000, 1.0, 500.0, 490.0, 10.0, allow_fractional=True)
+        self.assertGreater(size, 0)
+        self.assertEqual(portfolio.position_size(1_000, 1.0, 500.0, 490.0, 10.0), 0)
 
 
 class TestOpenPosition(unittest.TestCase):

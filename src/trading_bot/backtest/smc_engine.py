@@ -43,12 +43,16 @@ def _daily_uptrend_dates(ticker: str, daily_dir: Path) -> set | None:
     return set(uptrend["Date"].dt.date)
 
 
-def _trade_row(timestamp, symbol: str, side: str, qty: int, price: float, order_id: int, reason: str) -> dict:
+def _trade_row(timestamp, symbol: str, side: str, qty: float, price: float, order_id: int, reason: str) -> dict:
+    # qty stays int for whole-share sizing (the common case) and float
+    # only when fractional sizing is in play -- avoids turning every
+    # ordinary backtest's "size": 333 into "size": 333.0 in the output.
+    size = qty if isinstance(qty, float) and not qty.is_integer() else int(qty)
     return {
         "timestamp_iso": timestamp.tz_convert("UTC").isoformat(),
         "symbol": symbol,
         "side": side,
-        "size": int(qty),
+        "size": size,
         "fill_price": round(float(price), 4),
         "order_id": order_id,
         "status": "Filled",
@@ -113,6 +117,11 @@ def simulate_smc_portfolio(
     reactive_derisk_window: int | None = None,
     reactive_derisk_pf_threshold: float = DEFAULT_REACTIVE_DERISK_PF_THRESHOLD,
     reactive_derisk_size_mult: float = DEFAULT_REACTIVE_DERISK_SIZE_MULT,
+    commission_per_share: float | None = None,
+    commission_min: float = portfolio.DEFAULT_COMMISSION_MIN,
+    allow_fractional_shares: bool = False,
+    fractional_commission_pct: float = portfolio.DEFAULT_FRACTIONAL_COMMISSION_PCT,
+    fractional_commission_min: float = portfolio.DEFAULT_FRACTIONAL_COMMISSION_MIN,
 ) -> dict:
     """Phase 2 (see module docstring): the portfolio-level chronological
     merge over signals already produced by build_smc_candidates(). Returns
@@ -138,6 +147,28 @@ def simulate_smc_portfolio(
         size_mult defaults above to be the strongest, most consistent
         setting -- but with only one weak year in that sweep, treat this
         as a reasonable starting point, not a proven-optimal one.
+    commission_per_share: $/share commission (see portfolio.commission),
+        charged once per FILL (the entry BUY and every SELL fill, so a
+        tp1 + final exit pays it twice on the way out). Left None (the
+        default), no commission is modeled at all -- every result in this
+        module's earlier design/tuning work was on a zero-cost basis.
+    allow_fractional_shares: see portfolio.position_size. Defaults to
+        False (whole shares -- the live bot's actual current capability).
+        Small accounts often can't afford even 1 whole share of many
+        S&P 500 names under the risk/position-size caps, which both
+        shrinks the effective tradeable universe AND makes the handful
+        of positions that DO execute tiny enough that a flat per-order
+        commission minimum dominates their economics. When True, fills
+        are costed via fractional_commission_pct/_min (IBKR's ACTUAL
+        published fractional-share schedule -- 1% of trade value, $0.01
+        minimum -- confirmed against IBKR's own commissions pages,
+        2026-04) instead of commission_per_share/commission_min, since
+        real fractional fills are billed completely differently, not
+        just "the per-share rate applied to a non-integer qty". Needs
+        real broker support to ever go live: IBKR does offer fractional
+        shares, but this codebase's own order-placement path
+        (broker/ibkr_client.py) is whole-shares-only today -- this flag
+        only affects the backtest.
     """
     equity = float(initial_capital)
     open_symbols: set[str] = set()
@@ -160,6 +191,13 @@ def simulate_smc_portfolio(
             fill_date, _, symbol, qty, entry_price, fill = heapq.heappop(fill_heap)
             fill_pnl = (fill["price"] - entry_price) * qty
             equity += fill_pnl
+            if commission_per_share is not None:
+                if allow_fractional_shares:
+                    equity -= portfolio.fractional_commission(
+                        qty, fill["price"], fractional_commission_pct, fractional_commission_min,
+                    )
+                else:
+                    equity -= portfolio.commission(qty, commission_per_share, commission_min)
             order_id += 1
             trades_out.append(_trade_row(fill_date, symbol, "SELL", qty, fill["price"], order_id, fill["reason"]))
             remaining_fills[symbol] -= 1
@@ -191,13 +229,24 @@ def simulate_smc_portfolio(
 
         entry_price = trade["entry_price"]
         stop_price = trade["stop_price"]
-        size = portfolio.position_size(equity, risk_pct, entry_price, stop_price, max_position_pct)
-        size = int(size * _size_multiplier())
-        if size < 1:
+        size = portfolio.position_size(
+            equity, risk_pct, entry_price, stop_price, max_position_pct, allow_fractional_shares,
+        )
+        size = size * _size_multiplier()
+        size = round(size, 6) if allow_fractional_shares else int(size)
+        min_size = 1e-6 if allow_fractional_shares else 1
+        if size < min_size:
             continue
 
         open_symbols.add(symbol)
         order_id += 1
+        if commission_per_share is not None:
+            if allow_fractional_shares:
+                equity -= portfolio.fractional_commission(
+                    size, entry_price, fractional_commission_pct, fractional_commission_min,
+                )
+            else:
+                equity -= portfolio.commission(size, commission_per_share, commission_min)
         trades_out.append(_trade_row(entry_date, symbol, "BUY", size, entry_price, order_id, "entry"))
         equity_curve.append({"timestamp": entry_date.isoformat(), "equity": equity})
 
@@ -205,10 +254,15 @@ def simulate_smc_portfolio(
         remaining_fills[symbol] = len(fills)
         remaining_qty = size
         for i, fill in enumerate(fills):
-            fill_qty = remaining_qty if i == len(fills) - 1 else round(size * fill["qty_fraction"])
+            if i == len(fills) - 1:
+                fill_qty = remaining_qty
+            elif allow_fractional_shares:
+                fill_qty = round(size * fill["qty_fraction"], 6)
+            else:
+                fill_qty = round(size * fill["qty_fraction"])
             fill_qty = min(fill_qty, remaining_qty)
             remaining_qty -= fill_qty
-            if fill_qty < 1:
+            if fill_qty < min_size:
                 remaining_fills[symbol] -= 1
                 continue
             heapq.heappush(fill_heap, (fill["date"], next(counter), symbol, fill_qty, entry_price, fill))
@@ -241,6 +295,11 @@ def run_smc_backtest(
     reactive_derisk_window: int | None = None,
     reactive_derisk_pf_threshold: float = DEFAULT_REACTIVE_DERISK_PF_THRESHOLD,
     reactive_derisk_size_mult: float = DEFAULT_REACTIVE_DERISK_SIZE_MULT,
+    commission_per_share: float | None = None,
+    commission_min: float = portfolio.DEFAULT_COMMISSION_MIN,
+    allow_fractional_shares: bool = False,
+    fractional_commission_pct: float = portfolio.DEFAULT_FRACTIONAL_COMMISSION_PCT,
+    fractional_commission_min: float = portfolio.DEFAULT_FRACTIONAL_COMMISSION_MIN,
 ) -> dict:
     """Convenience one-shot wrapper: build_smc_candidates() +
     simulate_smc_portfolio() in a single call, for callers that don't need
@@ -254,4 +313,6 @@ def run_smc_backtest(
     return simulate_smc_portfolio(
         candidates, initial_capital, risk_pct, max_position_pct, max_concurrent_positions,
         reactive_derisk_window, reactive_derisk_pf_threshold, reactive_derisk_size_mult,
+        commission_per_share, commission_min, allow_fractional_shares,
+        fractional_commission_pct, fractional_commission_min,
     )

@@ -27,26 +27,71 @@ with patch("sys.exit"), contextlib.redirect_stdout(io.StringIO()):
     from trading_bot.cli.cycle import compute_swing_lows
 
 
+DEFAULT_COMMISSION_PER_SHARE = 0.005
+DEFAULT_COMMISSION_MIN = 1.0
+
+
+def commission(qty: float, per_share: float = DEFAULT_COMMISSION_PER_SHARE, minimum: float = DEFAULT_COMMISSION_MIN) -> float:
+    """IBKR's standard WHOLE-SHARE US-stock commission schedule: $/share
+    with a per-order minimum (defaults: $0.005/share, $1.00 minimum,
+    IBKR's Fixed plan). Applies once per FILL (each BUY or SELL
+    execution), not once per round-trip trade -- a position closed via a
+    partial + a final fill pays this twice on the way out, matching real
+    order-by-order billing. Do NOT use this for fractional-share fills --
+    see fractional_commission, which follows IBKR's actual (different)
+    published schedule for those."""
+    return max(qty * per_share, minimum)
+
+
+DEFAULT_FRACTIONAL_COMMISSION_PCT = 0.01
+DEFAULT_FRACTIONAL_COMMISSION_MIN = 0.01
+
+
+def fractional_commission(
+    qty: float,
+    price: float,
+    pct_of_notional: float = DEFAULT_FRACTIONAL_COMMISSION_PCT,
+    minimum: float = DEFAULT_FRACTIONAL_COMMISSION_MIN,
+) -> float:
+    """IBKR's ACTUAL published fractional-share commission schedule --
+    confirmed via IBKR's own commissions pages (2026-04): the greater of
+    1% of trade value or $0.01 per fill. This is a completely different
+    structure from the whole-share per-share/flat-minimum schedule above
+    (which is what `commission()` models) -- fractional fills are NOT
+    just "the per-share rate applied to a non-integer qty"."""
+    return max(qty * price * pct_of_notional, minimum)
+
+
 def position_size(
     portfolio_value: float,
     risk_pct: float,
     price: float,
     initial_stop: float,
     max_position_pct: float,
-) -> int:
+    allow_fractional: bool = False,
+) -> float:
     """Risk-based share count, capped at `max_position_pct` of portfolio value.
 
     Mirrors cycle.entry_scan: size = min(risk_dollars / R, max_position_pct%
-    of portfolio_value / price), floored to a whole share count. Returns 0
-    if R <= 0 (non-positive risk distance) or the capped size is < 1 share.
+    of portfolio_value / price). Returns 0 if R <= 0 (non-positive risk
+    distance) or the capped size rounds/clips to <= 0.
+
+    allow_fractional: when False (the default -- matches the live bot's
+        actual current capability, whole-share orders only), the result
+        is floored to a whole share count (an int). When True, returns
+        the raw fractional share count instead, for brokers/backtests
+        that support fractional-share orders -- e.g. IBKR fractional
+        shares, which sidestep small accounts rounding most signals down
+        to 0 shares in the first place.
     """
     r_per_share = price - initial_stop
     if r_per_share <= 0:
         return 0
     risk_dollars = portfolio_value * (risk_pct / 100)
-    size_by_risk = math.floor(risk_dollars / r_per_share)
-    size_by_cap = math.floor(portfolio_value * (max_position_pct / 100) / price)
-    return max(0, min(size_by_risk, size_by_cap))
+    size_by_risk = risk_dollars / r_per_share
+    size_by_cap = portfolio_value * (max_position_pct / 100) / price
+    size = max(0.0, min(size_by_risk, size_by_cap))
+    return size if allow_fractional else math.floor(size)
 
 
 def initial_stop_from_lod(today_lod: float) -> float:

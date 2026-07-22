@@ -68,6 +68,70 @@ class TestRunSmcBacktestSingleSymbol(unittest.TestCase):
         expected_final_equity = 100_000 + (17 - 11) * expected_size
         self.assertAlmostEqual(result["equity_curve"][-1]["equity"], expected_final_equity, places=2)
 
+    def test_commission_charged_once_per_fill_when_enabled(self):
+        _write_intraday_csv(self.intraday_dir / "TEST.csv", LIFECYCLE_ROWS)
+
+        no_commission = run_smc_backtest(
+            ["TEST"], 100_000, risk_pct=1.0, max_position_pct=10.0, intraday_dir=self.intraday_dir,
+        )
+        with_commission = run_smc_backtest(
+            ["TEST"], 100_000, risk_pct=1.0, max_position_pct=10.0, intraday_dir=self.intraday_dir,
+            commission_per_share=0.005, commission_min=1.0,
+        )
+
+        size = no_commission["trades"][0]["size"]
+        expected_total_commission = 2 * portfolio.commission(size, 0.005, 1.0)  # one BUY fill, one SELL fill
+        expected_equity = no_commission["equity_curve"][-1]["equity"] - expected_total_commission
+        self.assertAlmostEqual(with_commission["equity_curve"][-1]["equity"], expected_equity, places=6)
+
+    def test_fractional_shares_take_a_trade_a_tiny_account_would_otherwise_skip(self):
+        _write_intraday_csv(self.intraday_dir / "TEST.csv", LIFECYCLE_ROWS)
+
+        # $10 account, 1% risk, 10% cap, entry@11/stop@8 -> both risk-based
+        # and cap-based sizing round to 0 whole shares, so the default
+        # (whole-share) backtest takes no trade at all.
+        whole_shares = run_smc_backtest(
+            ["TEST"], 10, risk_pct=1.0, max_position_pct=10.0, intraday_dir=self.intraday_dir,
+        )
+        self.assertEqual(whole_shares["trades"], [])
+
+        fractional = run_smc_backtest(
+            ["TEST"], 10, risk_pct=1.0, max_position_pct=10.0, intraday_dir=self.intraday_dir,
+            allow_fractional_shares=True,
+        )
+        self.assertEqual(len(fractional["trades"]), 2)
+        buy, sell = fractional["trades"]
+        expected_size = portfolio.position_size(10, 1.0, 11, 8, 10.0, allow_fractional=True)
+        self.assertAlmostEqual(buy["size"], expected_size, places=5)
+        self.assertAlmostEqual(sell["size"], expected_size, places=5)
+        self.assertGreater(buy["size"], 0)
+        self.assertLess(buy["size"], 1)  # confirms this really is sub-1-share sizing
+
+    def test_fractional_fills_billed_via_ibkr_fractional_schedule_not_whole_share_one(self):
+        """With allow_fractional_shares, commission must come from
+        fractional_commission (1% of notional, $0.01 min) -- NOT
+        commission() (the whole-share $/share + $1 min formula), which
+        would be wildly wrong for a sub-1-share fill (e.g. $1 flat on a
+        position worth a few cents)."""
+        _write_intraday_csv(self.intraday_dir / "TEST.csv", LIFECYCLE_ROWS)
+
+        no_commission = run_smc_backtest(
+            ["TEST"], 10, risk_pct=1.0, max_position_pct=10.0, intraday_dir=self.intraday_dir,
+            allow_fractional_shares=True,
+        )
+        with_commission = run_smc_backtest(
+            ["TEST"], 10, risk_pct=1.0, max_position_pct=10.0, intraday_dir=self.intraday_dir,
+            allow_fractional_shares=True, commission_per_share=0.005, commission_min=1.0,
+        )
+
+        size = no_commission["trades"][0]["size"]
+        expected_total_commission = (
+            portfolio.fractional_commission(size, 11)  # BUY fill @ entry price 11
+            + portfolio.fractional_commission(size, 17)  # SELL fill @ exit price 17
+        )
+        expected_equity = no_commission["equity_curve"][-1]["equity"] - expected_total_commission
+        self.assertAlmostEqual(with_commission["equity_curve"][-1]["equity"], expected_equity, places=6)
+
 
 # Same fixture as test_smc_signals.py's test_stop_out_before_any_exit_signal:
 # entry @ 11 (idx 8), stopped out @ 8 (idx 9) -- a clean, deterministic loss.
