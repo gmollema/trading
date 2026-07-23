@@ -22,6 +22,7 @@ from trading_bot.backtest.data import DAILY_DIR, INTRADAY_DIR, compute_daily_con
 from trading_bot.backtest.smc_signals import DEFAULT_SWING_WINDOW, find_smc_long_trades
 
 DEFAULT_MAX_POSITION_PCT = 10.0
+DEFAULT_MAX_CONCURRENT_POSITIONS = 2
 DEFAULT_TIME_WINDOW_BARS = 33
 DEFAULT_TP1_FRACTION = 0.25
 DEFAULT_REACTIVE_DERISK_PF_THRESHOLD = 0.8
@@ -113,7 +114,7 @@ def simulate_smc_portfolio(
     initial_capital: float,
     risk_pct: float = 1.0,
     max_position_pct: float = DEFAULT_MAX_POSITION_PCT,
-    max_concurrent_positions: int | None = 5,
+    max_concurrent_positions: int | None = DEFAULT_MAX_CONCURRENT_POSITIONS,
     reactive_derisk_window: int | None = None,
     reactive_derisk_pf_threshold: float = DEFAULT_REACTIVE_DERISK_PF_THRESHOLD,
     reactive_derisk_size_mult: float = DEFAULT_REACTIVE_DERISK_SIZE_MULT,
@@ -129,6 +130,18 @@ def simulate_smc_portfolio(
     schema as trade.CSV_HEADER plus an extra `reason` field (entry/tp1/
     stop/new_high_exit/end_of_data/same_day_force_close), same convention
     as backtest/engine.py's trade rows.
+
+    max_concurrent_positions: each open position sizes itself against
+        CURRENT equity independently, with no check on capital already
+        committed to other positions open at the same time -- so this
+        cap controls more than "how many symbols at once," it bounds
+        worst-case aggregate exposure. At max_position_pct=50%, going
+        from 2 to 5 concurrent positions was measured to raise worst-case
+        simultaneous notional exposure from ~110-136% of capital to
+        ~213-336% (real effective leverage), for a return that wasn't
+        consistently better. 2 was the smallest value that still let
+        returns compound at a healthy pace across all three backtested
+        years while keeping that worst case close to 1x.
 
     reactive_derisk_window: NOT part of the literal Level 1 spec -- a
         reactive (not predictive) risk control. When set, every new
@@ -283,7 +296,7 @@ def run_smc_backtest(
     initial_capital: float,
     risk_pct: float = 1.0,
     max_position_pct: float = DEFAULT_MAX_POSITION_PCT,
-    max_concurrent_positions: int | None = 5,
+    max_concurrent_positions: int | None = DEFAULT_MAX_CONCURRENT_POSITIONS,
     intraday_dir: Path = INTRADAY_DIR,
     time_window_bars: int = DEFAULT_TIME_WINDOW_BARS,
     tp1_fraction: float = DEFAULT_TP1_FRACTION,
