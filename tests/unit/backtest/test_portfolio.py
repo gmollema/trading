@@ -52,6 +52,16 @@ class TestCommission(unittest.TestCase):
         self.assertAlmostEqual(portfolio.commission(1000), 5.0)
         self.assertAlmostEqual(portfolio.commission(1), 1.0)
 
+    def test_tiered_constants_match_ibkr_tiered_base_schedule(self):
+        # 1000 shares @ $0.0035 = $3.50 (rate binds); 50 shares @ $0.0035
+        # = $0.175 -> the $0.35 minimum binds instead.
+        self.assertAlmostEqual(
+            portfolio.commission(1000, portfolio.TIERED_COMMISSION_PER_SHARE, portfolio.TIERED_COMMISSION_MIN), 3.5
+        )
+        self.assertAlmostEqual(
+            portfolio.commission(50, portfolio.TIERED_COMMISSION_PER_SHARE, portfolio.TIERED_COMMISSION_MIN), 0.35
+        )
+
 
 class TestFractionalCommission(unittest.TestCase):
     def test_pct_of_notional_binds_above_minimum(self):

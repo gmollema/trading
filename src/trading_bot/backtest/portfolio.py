@@ -30,6 +30,20 @@ with patch("sys.exit"), contextlib.redirect_stdout(io.StringIO()):
 DEFAULT_COMMISSION_PER_SHARE = 0.005
 DEFAULT_COMMISSION_MIN = 1.0
 
+# IBKR's TIERED plan base rate (monthly volume <= 300k shares):
+# $0.0035/share with a $0.35 per-order minimum. Exchange/clearing/
+# regulatory pass-throughs come on top, so the real all-in cost lands
+# between this and roughly $0.005/share with a $0.50 minimum -- pass the
+# conservative pair when bracketing. Why it matters for THIS codebase:
+# the small-account failure mode measured for the SMC strategy is the
+# flat per-order minimum dominating tiny fills, so Fixed -> Tiered
+# roughly HALVES the viable capital floor (backtested 2026-07: ~$10K ->
+# ~$5K at a 30% position cap, positive on all three cached years even
+# under the conservative variant; $1K stays unviable under every
+# schedule tested, including zero commission).
+TIERED_COMMISSION_PER_SHARE = 0.0035
+TIERED_COMMISSION_MIN = 0.35
+
 
 def commission(qty: float, per_share: float = DEFAULT_COMMISSION_PER_SHARE, minimum: float = DEFAULT_COMMISSION_MIN) -> float:
     """IBKR's standard WHOLE-SHARE US-stock commission schedule: $/share
