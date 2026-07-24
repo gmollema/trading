@@ -104,6 +104,8 @@ def main() -> None:
     prefilter_tr = quoted_tr("trading_bot.cli.morning_prefilter")
     cycle_tr = quoted_tr("trading_bot.cli.cycle")
     dashboard_tr = quoted_tr("trading_bot.cli.compute_perf")
+    smc_prefilter_tr = quoted_tr("trading_bot.cli.smc_prefilter")
+    smc_cycle_tr = quoted_tr("trading_bot.cli.smc_cycle")
     keepawake_tr = "powercfg /change standby-timeout-ac 0"
 
     # HT_LogRotate - 09:25 ET, Mon-Fri
@@ -126,6 +128,16 @@ def main() -> None:
     # HT_Dashboard - 16:05 ET, Mon-Fri
     build_weekly_task("HT_Dashboard", dashboard_tr, 16, 5)
 
+    # HT_SMC_Prefilter - 09:40 ET, Mon-Fri: builds smc_watchlist.txt
+    # (prior close > SMA200 = the SMC daily_trend_filter, computed from
+    # prior-day data so once per morning is exactly enough).
+    build_weekly_task("HT_SMC_Prefilter", smc_prefilter_tr, 9, 40)
+
+    # HT_SMC_Cycle - every 5 minutes starting 10:02 ET (staggered 2 min
+    # after HT_Cycle so the two bots' yfinance/IBKR bursts don't collide).
+    # smc_cycle.py's own fast gate exits in under a second off-hours.
+    build_cycle_task("HT_SMC_Cycle", smc_cycle_tr, 10, 2)
+
     print()
     # schtasks /query /tn does NOT support wildcards (e.g. "HT_*") - it
     # expects an exact task name, so query everything and filter here.
@@ -144,7 +156,10 @@ def main() -> None:
         print("\n".join(header_lines))
         print("\n".join(ht_lines))
 
-    print("SCHEDULED: 11 tasks created. The bot will fire on its own starting next market open. Watch Telegram.")
+    print(
+        "SCHEDULED: 13 tasks created (incl. HT_SMC_Prefilter/HT_SMC_Cycle for the SMC bot). "
+        "The bots will fire on their own starting next market open. Watch Telegram."
+    )
 
 
 if __name__ == "__main__":

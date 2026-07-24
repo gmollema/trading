@@ -1,0 +1,28 @@
+{
+  "strategy_name": "SMC Level 1 (order blocks)",
+  "direction": "long_only",
+  "trade_timeframe": "5m",
+  "swing_window": 20,
+  "time_window_bars": 33,
+  "tp1_fraction": 0.25,
+  "risk": {
+    "max_risk_per_trade_pct": 1.0,
+    "max_position_size_pct_of_portfolio": 10.0,
+    "max_concurrent_positions": 2,
+    "max_trades_per_day": 40
+  },
+  "reactive_derisk": {
+    "window": 200,
+    "pf_threshold": 0.8,
+    "size_mult": 0.3
+  },
+  "time_filter": {
+    "earliest_entry_et": "10:05",
+    "latest_entry_et": "15:30",
+    "force_close_et": "15:51"
+  },
+  "universe": {
+    "max_watchlist_size": 40,
+    "min_price_usd": 3.0
+  }
+}

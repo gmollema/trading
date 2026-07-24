@@ -132,7 +132,7 @@ class TestMain(unittest.TestCase):
         self.assertEqual(ctx.exception.code, 1)
         mock_run.assert_not_called()
 
-    def test_creates_eleven_tasks_when_venv_exists(self):
+    def test_creates_thirteen_tasks_when_venv_exists(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             fake_venv_py = Path(tmpdir) / "python.exe"
             fake_venv_py.write_text("")  # just needs to exist
@@ -147,8 +147,12 @@ class TestMain(unittest.TestCase):
                         setup_schedule.main()
 
         create_calls = [c for c in mock_run.call_args_list if c[0][0][1] == "/create"]
-        self.assertEqual(len(create_calls), 11)
-        self.assertIn("11 tasks created", buf.getvalue())
+        self.assertEqual(len(create_calls), 13)
+        self.assertIn("13 tasks created", buf.getvalue())
+
+        created_names = [c[0][0][3] for c in create_calls]
+        self.assertIn("HT_SMC_Prefilter", created_names)
+        self.assertIn("HT_SMC_Cycle", created_names)
 
 
 if __name__ == "__main__":

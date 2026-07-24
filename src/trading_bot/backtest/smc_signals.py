@@ -284,3 +284,53 @@ def find_smc_long_trades(
         trades.append(open_trade)
 
     return trades
+
+
+# ---------------------------------------------------------------------------
+# Live-polling adapters (used by cli/smc_cycle.py)
+#
+# The live bot re-runs the SAME find_smc_long_trades pass over recent bar
+# history each cycle instead of tracking OB state incrementally -- one
+# source of truth for the signal logic, no live-vs-backtest drift.
+# ---------------------------------------------------------------------------
+
+def latest_entry_signal(
+    bars: dict,
+    time_window_bars: int = DEFAULT_TIME_WINDOW_BARS,
+    tp1_fraction: float = DEFAULT_TP1_FRACTION,
+    swing_window: int = DEFAULT_SWING_WINDOW,
+    require_confirmed_trend: bool = False,
+) -> dict | None:
+    """If this symbol's SMC entry would trigger on the LAST bar of `bars`,
+    return that trade dict (entry_price = OB high, stop_price = OB low,
+    tp1_price or None); else None.
+
+    Deliberately runs with force_close_same_day=False: that flag skips
+    entries on the final bar of a day, and to a mid-session recompute the
+    latest fetched bar ALWAYS looks like the final bar -- it would
+    suppress every live entry. Same-day discipline is enforced by the
+    live bot's own EOD force-close instead, and the entry-window gate
+    (no entries near the close) covers the true last-bar-of-day case.
+    """
+    n = len(bars["close"])
+    if n == 0:
+        return None
+    for trade in find_smc_long_trades(
+        bars, time_window_bars, tp1_fraction, swing_window, require_confirmed_trend,
+        force_close_same_day=False,
+    ):
+        if trade["entry_idx"] == n - 1:
+            return trade
+    return None
+
+
+def confirmed_new_high_exit(highs: list[float], entry_idx: int, swing_window: int = DEFAULT_SWING_WINDOW) -> bool:
+    """True once a swing high has formed strictly AFTER entry_idx and been
+    confirmed (i.e. swing_window bars have printed after it) -- the same
+    `entry_idx < sh_idx <= i and sh_idx + swing_window <= i` condition the
+    backtest's full-exit branch uses, evaluated at i = the latest bar."""
+    last_idx = len(highs) - 1
+    for sh_idx, _ in find_swing_highs(highs, swing_window):
+        if sh_idx > entry_idx and sh_idx + swing_window <= last_idx:
+            return True
+    return False

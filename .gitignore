@@ -10,6 +10,12 @@ safety-check-log.json
 watchlist.txt
 backtest_data/
 
+# SMC bot runtime state (mirrors the gap-and-go bot's ignored state files)
+smc_trades.csv
+smc_open_positions.json
+smc-safety-check-log.json
+smc_watchlist.txt
+
 # IDE / test cache / local Claude Code settings -- machine-specific, not shared
 .idea/
 .pytest_cache/

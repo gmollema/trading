@@ -241,5 +241,63 @@ class TestForceCloseSameDay(unittest.TestCase):
         self.assertEqual(forced, [])
 
 
+class TestLatestEntrySignal(unittest.TestCase):
+    """Live-polling adapter over the hand-traced lifecycle fixture, padded
+    with 2 extra flat leading bars so truncating at the entry bar still
+    clears find_smc_long_trades' n >= 10 minimum (live bar windows are
+    hundreds of bars, so the guard never matters there -- only in this
+    fixture). With the padding, the entry triggers on idx 10: a live
+    recompute whose LAST bar is idx 10 should report the signal, and one
+    ending a bar earlier should not."""
+
+    PADDED_ROWS = [(10, 10, 9, 10)] * 2 + [
+        (10, 10, 9, 10), (10, 10, 9, 10), (12, 12, 11, 12), (10, 10, 9, 10), (10, 10, 9, 10),
+        (11, 11, 8, 9), (9, 17, 12, 16), (16, 20, 16, 19), (19, 19, 10, 13),
+        (13, 16, 13, 15), (15, 19, 15, 18), (18, 25, 17, 17), (17, 20, 15, 16), (16, 18, 13, 14),
+    ]
+    ENTRY_IDX = 10
+
+    def test_signal_fires_when_entry_bar_is_last(self):
+        bars = _bars(self.PADDED_ROWS[:self.ENTRY_IDX + 1])  # ends on the entry bar
+        signal = smc.latest_entry_signal(bars)
+        self.assertIsNotNone(signal)
+        self.assertEqual(signal["entry_idx"], self.ENTRY_IDX)
+        self.assertEqual(signal["entry_price"], 11)
+        self.assertEqual(signal["stop_price"], 8)
+        self.assertIsNone(signal["tp1_price"])
+
+    def test_no_signal_one_bar_before_entry(self):
+        bars = _bars(self.PADDED_ROWS[:self.ENTRY_IDX])
+        self.assertIsNone(smc.latest_entry_signal(bars))
+
+    def test_no_signal_after_entry_bar_has_passed(self):
+        # A cycle running one bar late must NOT re-report the same entry
+        # (the OB was mitigated on the entry bar; the next bar is not an
+        # entry bar).
+        bars = _bars(self.PADDED_ROWS[:self.ENTRY_IDX + 2])
+        self.assertIsNone(smc.latest_entry_signal(bars))
+
+    def test_empty_bars_returns_none(self):
+        self.assertIsNone(smc.latest_entry_signal(_bars([])))
+
+
+class TestConfirmedNewHighExit(unittest.TestCase):
+    HIGHS = [10, 10, 12, 10, 10, 11, 17, 20, 19, 16, 19, 25, 20, 18]  # swing high @ idx 11 (25)
+
+    def test_exit_once_post_entry_swing_high_is_confirmed(self):
+        # entry @ idx 8; swing high @ 11 needs 2 bars after it (window=2),
+        # so it's confirmed once idx 13 exists.
+        self.assertTrue(smc.confirmed_new_high_exit(self.HIGHS, entry_idx=8, swing_window=2))
+
+    def test_no_exit_before_confirmation_lag_elapses(self):
+        self.assertFalse(smc.confirmed_new_high_exit(self.HIGHS[:13], entry_idx=8, swing_window=2))
+
+    def test_pre_entry_swing_highs_do_not_trigger(self):
+        # Swing high @ idx 2 (12) is before an entry at idx 8 -- with the
+        # post-entry data truncated so idx 11's high isn't confirmed, the
+        # pre-entry pivot alone must not fire the exit.
+        self.assertFalse(smc.confirmed_new_high_exit(self.HIGHS[:12], entry_idx=8, swing_window=2))
+
+
 if __name__ == "__main__":
     unittest.main()
