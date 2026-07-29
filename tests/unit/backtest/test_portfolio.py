@@ -77,6 +77,23 @@ class TestFractionalCommission(unittest.TestCase):
         self.assertAlmostEqual(portfolio.fractional_commission(0.001, 10.0), 0.01)
 
 
+class TestFxCommission(unittest.TestCase):
+    def test_bps_rate_binds_above_minimum(self):
+        # $100,000 notional @ 0.20 bps = $2.00 -- exactly at the minimum,
+        # so bump notional up to make the rate clearly bind instead.
+        self.assertAlmostEqual(portfolio.fx_commission(500_000, 0.20, 2.0), 10.0)
+
+    def test_minimum_binds_for_small_notional(self):
+        # $10,000 notional @ 0.20 bps = $0.20, below the $2.00 minimum.
+        self.assertAlmostEqual(portfolio.fx_commission(10_000, 0.20, 2.0), 2.0)
+
+    def test_defaults_match_ibkr_idealpro_tier_1_schedule(self):
+        # $100,000 notional (a standard lot) @ 0.20 bps = $2.00, which is
+        # also exactly the minimum -- IBKR's own worked example.
+        self.assertAlmostEqual(portfolio.fx_commission(100_000), 2.0)
+        self.assertAlmostEqual(portfolio.fx_commission(1_000), 2.0)
+
+
 class TestPositionSize(unittest.TestCase):
     def test_risk_based_size_when_it_is_the_binding_constraint(self):
         # risk_dollars = 100_000 * 1% = 1000; R = 100-95 = 5 -> size_by_risk = 200

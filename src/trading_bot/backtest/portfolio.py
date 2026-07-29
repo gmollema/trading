@@ -76,6 +76,36 @@ def fractional_commission(
     return max(qty * price * pct_of_notional, minimum)
 
 
+# IBKR IDEALPRO forex commission, Tier I (retail; applies up to $1B of
+# combined monthly spot-currency trade value, which covers every account
+# this codebase is built for): 0.20 basis points of trade notional, with
+# a $2.00 minimum per order. Verified against IBKR's published forex
+# commission schedule (2026-07). This is a completely different cost
+# structure from the per-share equity schedules above (commission() /
+# fractional_commission()) -- FX commission is priced off notional trade
+# value, not share count, so those must not be reused for FX fills.
+FX_COMMISSION_BPS = 0.20
+FX_COMMISSION_MIN_USD = 2.00
+
+
+def fx_commission(notional: float, bps: float = FX_COMMISSION_BPS, minimum: float = FX_COMMISSION_MIN_USD) -> float:
+    """IBKR IDEALPRO's forex commission: bps/10000 * notional, or
+    `minimum`, whichever is greater. Applies once per FILL (each BUY or
+    SELL execution), same per-execution billing as commission()/
+    fractional_commission() above.
+
+    `notional` should be qty * price in USD. For a USD-quote pair
+    (EURUSD, GBPUSD, AUDUSD, NZDUSD -- price is USD per unit of base
+    currency) qty * price IS the USD notional exactly. For a USD-BASE
+    pair (USDJPY, USDCAD, USDCHF -- price is quote-currency per USD),
+    qty * price is actually quote-currency notional, not USD -- true to a
+    real IBKR fill this would need converting at the prevailing USD/quote
+    rate, which this backtest's engines don't do (same simplification
+    ut_bot_engine's position sizing already makes when it treats risk
+    distance in "price units" as USD regardless of quote convention)."""
+    return max(notional * bps / 10000, minimum)
+
+
 def position_size(
     portfolio_value: float,
     risk_pct: float,
