@@ -94,6 +94,34 @@ class TestFxCommission(unittest.TestCase):
         self.assertAlmostEqual(portfolio.fx_commission(1_000), 2.0)
 
 
+class TestFxPipSize(unittest.TestCase):
+    def test_jpy_pairs_use_the_two_decimal_pip(self):
+        self.assertAlmostEqual(portfolio.fx_pip_size("USDJPY"), 0.01)
+        self.assertAlmostEqual(portfolio.fx_pip_size("usdjpy"), 0.01)
+
+    def test_non_jpy_pairs_use_the_four_decimal_pip(self):
+        self.assertAlmostEqual(portfolio.fx_pip_size("GBPUSD"), 0.0001)
+        self.assertAlmostEqual(portfolio.fx_pip_size("EURUSD"), 0.0001)
+
+
+class TestFxHalfSpreadPrice(unittest.TestCase):
+    def test_non_jpy_pair_converts_pips_at_four_decimals(self):
+        # 2 pips on a non-JPY pair = 0.0002; half of that = 0.0001.
+        self.assertAlmostEqual(portfolio.fx_half_spread_price("GBPUSD", 2.0), 0.0001)
+
+    def test_jpy_pair_converts_pips_at_two_decimals(self):
+        # 2 pips on USDJPY = 0.02; half of that = 0.01.
+        self.assertAlmostEqual(portfolio.fx_half_spread_price("USDJPY", 2.0), 0.01)
+
+
+class TestFxFillPrice(unittest.TestCase):
+    def test_buy_fills_above_mid(self):
+        self.assertAlmostEqual(portfolio.fx_fill_price(1.3000, "BUY", 0.0001), 1.3001)
+
+    def test_sell_fills_below_mid(self):
+        self.assertAlmostEqual(portfolio.fx_fill_price(1.3000, "SELL", 0.0001), 1.2999)
+
+
 class TestPositionSize(unittest.TestCase):
     def test_risk_based_size_when_it_is_the_binding_constraint(self):
         # risk_dollars = 100_000 * 1% = 1000; R = 100-95 = 5 -> size_by_risk = 200

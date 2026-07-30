@@ -16,6 +16,14 @@ value, not share count, so reusing those would silently apply the wrong
 cost model. Off by default (fx_commission_bps=None), matching how SMC's
 commission modeling defaults off too -- every result reported for this
 strategy before this was added is on a zero-cost basis.
+
+Spread: modeled via portfolio.fx_fill_price -- a BUY fills half a spread
+above the signal's raw mid price, a SELL half a spread below it, using
+`symbol`'s pip size (portfolio.fx_pip_size). Unlike commission, this is
+NOT a verified fixed schedule -- IBKR IDEALPRO passes through live
+interbank quotes, so real spread varies continuously. portfolio.
+FX_TYPICAL_SPREAD_PIPS is only a ballpark planning figure; see its
+docstring. Off by default (spread_pips=None).
 """
 
 from __future__ import annotations
@@ -56,6 +64,7 @@ def run_ut_bot_backtest(
     allow_fractional_shares: bool = False,
     fx_commission_bps: float | None = None,
     fx_commission_min: float = portfolio.FX_COMMISSION_MIN_USD,
+    spread_pips: float | None = None,
 ) -> dict:
     """Simulate the UT Bot strategy over one symbol's bars (see
     ut_bot_signals.find_ut_bot_long_trades for `bars`' shape). Returns
@@ -76,6 +85,18 @@ def run_ut_bot_backtest(
         commission is modeled at all -- matches every result already
         reported for this strategy and mirrors smc_engine.py's
         commission_per_share=None default.
+    spread_pips: half the bid/ask spread (portfolio.fx_fill_price) is
+        applied to each fill's price in `symbol`'s pip units
+        (portfolio.fx_pip_size) -- the entry BUY fills half a spread
+        ABOVE the signal's raw close, the exit SELL fills half a spread
+        BELOW it. Sizing and the stop-line itself still use the RAW
+        signal price (the technical calculation doesn't change just
+        because a fill would cost more) -- only the recorded fill_price
+        and the resulting equity/commission-notional are spread-adjusted.
+        Left None (the default), no spread cost is modeled -- unlike
+        fx_commission_bps's verified rate, portfolio.FX_TYPICAL_SPREAD_PIPS
+        is only a ballpark planning figure, so this stays opt-in rather
+        than silently defaulting to an assumed number.
     """
     signal_trades = find_ut_bot_long_trades(bars, key_value, atr_period)
 
@@ -83,6 +104,7 @@ def run_ut_bot_backtest(
     trades_out: list[dict] = []
     equity_curve: list[dict] = []
     order_id = 0
+    half_spread = portfolio.fx_half_spread_price(symbol, spread_pips) if spread_pips is not None else 0.0
 
     for trade in signal_trades:
         entry_price = trade["entry_price"]
@@ -92,18 +114,23 @@ def run_ut_bot_backtest(
         if size < min_size:
             continue
 
+        entry_fill_price = portfolio.fx_fill_price(entry_price, "BUY", half_spread) if half_spread else entry_price
+        exit_fill_price = (
+            portfolio.fx_fill_price(trade["exit_price"], "SELL", half_spread) if half_spread else trade["exit_price"]
+        )
+
         order_id += 1
         if fx_commission_bps is not None:
-            equity -= portfolio.fx_commission(size * entry_price, fx_commission_bps, fx_commission_min)
-        trades_out.append(_trade_row(trade["entry_date"], symbol, "BUY", size, entry_price, order_id, "entry"))
+            equity -= portfolio.fx_commission(size * entry_fill_price, fx_commission_bps, fx_commission_min)
+        trades_out.append(_trade_row(trade["entry_date"], symbol, "BUY", size, entry_fill_price, order_id, "entry"))
         equity_curve.append({"timestamp": trade["entry_date"].isoformat(), "equity": equity})
 
-        equity += (trade["exit_price"] - entry_price) * size
+        equity += (exit_fill_price - entry_fill_price) * size
         if fx_commission_bps is not None:
-            equity -= portfolio.fx_commission(size * trade["exit_price"], fx_commission_bps, fx_commission_min)
+            equity -= portfolio.fx_commission(size * exit_fill_price, fx_commission_bps, fx_commission_min)
         order_id += 1
         trades_out.append(
-            _trade_row(trade["exit_date"], symbol, "SELL", size, trade["exit_price"], order_id, trade["reason"])
+            _trade_row(trade["exit_date"], symbol, "SELL", size, exit_fill_price, order_id, trade["reason"])
         )
         equity_curve.append({"timestamp": trade["exit_date"].isoformat(), "equity": equity})
 
@@ -136,6 +163,7 @@ def run_ut_bot_confirmed_backtest(
     allow_fractional_shares: bool = False,
     fx_commission_bps: float | None = None,
     fx_commission_min: float = portfolio.FX_COMMISSION_MIN_USD,
+    spread_pips: float | None = None,
 ) -> dict:
     """Long+short simulation of the user-specified "confirmed entry" UT
     Bot variant (see ut_bot_signals.find_ut_bot_confirmed_trades).
@@ -155,6 +183,11 @@ def run_ut_bot_confirmed_backtest(
         netted directly into each trade's closed pnl (so `summary`'s
         gross_pnl_usd/profit_factor/etc. are cost-inclusive), not just
         deducted from equity on the side.
+    spread_pips: see run_ut_bot_backtest's identical parameter. Applied
+        per the fill's ACTUAL order side (entry_side/exit_side below),
+        which already accounts for long vs short -- a short's opening
+        SELL crosses down to the bid exactly like a long's closing SELL
+        does, and is netted into closed_pnls the same way commission is.
     """
     signal_trades = find_ut_bot_confirmed_trades(bars, key_value, atr_period)
 
@@ -163,6 +196,7 @@ def run_ut_bot_confirmed_backtest(
     equity_curve: list[dict] = []
     closed_pnls: list[float] = []
     order_id = 0
+    half_spread = portfolio.fx_half_spread_price(symbol, spread_pips) if spread_pips is not None else 0.0
 
     for trade in signal_trades:
         entry_price = trade["entry_price"]
@@ -174,11 +208,22 @@ def run_ut_bot_confirmed_backtest(
             continue
 
         entry_side, exit_side = ("BUY", "SELL") if side == "long" else ("SELL", "BUY")
+        entry_fill_price = portfolio.fx_fill_price(entry_price, entry_side, half_spread) if half_spread else entry_price
+        exit_fill_price = (
+            portfolio.fx_fill_price(trade["exit_price"], exit_side, half_spread) if half_spread else trade["exit_price"]
+        )
+
         order_id += 1
-        trades_out.append(_trade_row(trade["entry_date"], symbol, entry_side, size, entry_price, order_id, f"entry_{side}"))
+        trades_out.append(
+            _trade_row(trade["entry_date"], symbol, entry_side, size, entry_fill_price, order_id, f"entry_{side}")
+        )
         equity_curve.append({"timestamp": trade["entry_date"].isoformat(), "equity": equity})
 
-        pnl = (trade["exit_price"] - entry_price) * size if side == "long" else (entry_price - trade["exit_price"]) * size
+        pnl = (
+            (exit_fill_price - entry_fill_price) * size
+            if side == "long"
+            else (entry_fill_price - exit_fill_price) * size
+        )
         if fx_commission_bps is not None:
             # Netted once, in full, at exit -- NOT also deducted from
             # equity at entry -- so it's counted exactly once per round
@@ -188,15 +233,15 @@ def run_ut_bot_confirmed_backtest(
             # above therefore doesn't yet reflect this trade's cost; it
             # only shows up when the round trip closes.
             round_trip_commission = (
-                portfolio.fx_commission(size * entry_price, fx_commission_bps, fx_commission_min)
-                + portfolio.fx_commission(size * trade["exit_price"], fx_commission_bps, fx_commission_min)
+                portfolio.fx_commission(size * entry_fill_price, fx_commission_bps, fx_commission_min)
+                + portfolio.fx_commission(size * exit_fill_price, fx_commission_bps, fx_commission_min)
             )
             pnl -= round_trip_commission
         equity += pnl
         closed_pnls.append(pnl)
         order_id += 1
         trades_out.append(
-            _trade_row(trade["exit_date"], symbol, exit_side, size, trade["exit_price"], order_id, trade["reason"])
+            _trade_row(trade["exit_date"], symbol, exit_side, size, exit_fill_price, order_id, trade["reason"])
         )
         equity_curve.append({"timestamp": trade["exit_date"].isoformat(), "equity": equity})
 

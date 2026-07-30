@@ -106,6 +106,58 @@ def fx_commission(notional: float, bps: float = FX_COMMISSION_BPS, minimum: floa
     return max(notional * bps / 10000, minimum)
 
 
+FX_PIP_SIZE = 0.0001
+FX_PIP_SIZE_JPY = 0.01
+
+# UNLIKE FX_COMMISSION_BPS above, this is NOT a published, verified
+# schedule -- IBKR IDEALPRO passes through live interbank quotes, so the
+# spread actually paid on any given fill varies continuously with
+# liquidity, time of day, and volatility; there is no fixed rate card for
+# it the way there is for commission. These are commonly-cited ballpark
+# figures for institutional/ECN-tier pricing (the tier IDEALPRO
+# approximates), cross-referenced across several public spread-comparison
+# sources (2026-07) -- a reasonable planning assumption for "is this
+# strategy's edge bigger than a plausible spread cost", NOT a guarantee
+# of what any specific fill will actually cost. Treat real execution data
+# as authoritative over this table whenever it's available.
+FX_TYPICAL_SPREAD_PIPS = {
+    "EURUSD": 0.2,
+    "GBPUSD": 0.4,
+    "USDJPY": 0.25,
+    "AUDUSD": 0.5,
+    "USDCAD": 0.6,
+    "USDCHF": 0.6,
+    "NZDUSD": 0.8,
+}
+
+
+def fx_pip_size(symbol: str) -> float:
+    """0.01 for JPY-quoted pairs (e.g. USDJPY), 0.0001 for every other
+    major -- the standard FX convention for what one "pip" is worth in
+    price terms."""
+    return FX_PIP_SIZE_JPY if symbol.upper().endswith("JPY") else FX_PIP_SIZE
+
+
+def fx_half_spread_price(symbol: str, spread_pips: float) -> float:
+    """Half of `spread_pips` converted to price units for `symbol` -- the
+    per-side cost an aggressive fill pays crossing the spread (see
+    fx_fill_price). `spread_pips` is always caller-supplied (e.g. from
+    FX_TYPICAL_SPREAD_PIPS, or real observed spread data) rather than
+    defaulted here, since -- unlike commission -- there's no single
+    "correct" number to fall back to silently."""
+    return spread_pips * fx_pip_size(symbol) / 2
+
+
+def fx_fill_price(mid_price: float, side: str, half_spread: float) -> float:
+    """The realistic fill price for an aggressive/market order crossing
+    the spread: a BUY fills at the ask (half_spread ABOVE mid), a SELL
+    fills at the bid (half_spread BELOW mid). `side` is the order's own
+    direction (BUY/SELL), not "entry vs exit" or "long vs short" -- a
+    short's opening SELL crosses down to the bid exactly like a long's
+    closing SELL does."""
+    return mid_price + half_spread if side == "BUY" else mid_price - half_spread
+
+
 def position_size(
     portfolio_value: float,
     risk_pct: float,
