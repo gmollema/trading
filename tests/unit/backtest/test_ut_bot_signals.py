@@ -135,6 +135,58 @@ class TestFindUtBotLongTrades(unittest.TestCase):
     def test_empty_bars_returns_no_trades(self):
         self.assertEqual(ut.find_ut_bot_long_trades(_bars([], [], [])), [])
 
+    def test_no_regime_filter_by_default(self):
+        # vol_filter_lookback defaults to None -- identical to
+        # test_full_round_trip's result even though the parameter now exists.
+        trades = ut.find_ut_bot_long_trades(_bars(self.H, self.L, self.C), key_value=1.0, atr_period=1)
+        self.assertEqual(len(trades), 1)
+        self.assertEqual(trades[0]["entry_idx"], 4)
+
+    def test_regime_filter_blocks_every_entry_without_enough_history(self):
+        # lookback (1000) far exceeds the 8-bar fixture, so
+        # volatility_regime_ok is False for every bar (no trailing average
+        # ever exists) -- the entry at idx 4 must be suppressed entirely.
+        trades = ut.find_ut_bot_long_trades(
+            _bars(self.H, self.L, self.C), key_value=1.0, atr_period=1,
+            vol_filter_lookback=1000, vol_filter_atr_period=1,
+        )
+        self.assertEqual(trades, [])
+
+    def test_regime_filter_lets_entry_through_when_volatility_is_calm(self):
+        # lookback=2 gives a valid trailing average from bar 1 onward, and
+        # this fixture's volatility never spikes relative to its own
+        # recent history (verified: volatility_regime_ok is only False on
+        # bar 0, True everywhere else) -- the idx 4 entry still fires.
+        trades = ut.find_ut_bot_long_trades(
+            _bars(self.H, self.L, self.C), key_value=1.0, atr_period=1,
+            vol_filter_lookback=2, vol_filter_max_ratio=1.5, vol_filter_atr_period=1,
+        )
+        self.assertEqual(len(trades), 1)
+        self.assertEqual(trades[0]["entry_idx"], 4)
+
+
+class TestTrailingAverage(unittest.TestCase):
+    def test_none_until_lookback_bars_exist(self):
+        self.assertEqual(ut._trailing_average([1, 2, 3, 4, 5], lookback=3), [None, None, 2.0, 3.0, 4.0])
+
+
+class TestVolatilityRegimeOk(unittest.TestCase):
+    def test_detects_a_volatility_spike_relative_to_trailing_history(self):
+        # closes held constant at 100 so true_range is driven entirely by
+        # each bar's own high-low (no gap component): TR = [2, 2, 2, 20, 2]
+        # at atr_period=1 (TR passes straight through, see TestWilderAtr).
+        # With lookback=3, max_ratio=1.5: bars 0-1 have no trailing average
+        # yet (False); bar 2's average (0.02) matches its own TR (0.02,
+        # True); bar 3 spikes to TR=20 (atr_pct=0.20) against a trailing
+        # average of 0.08 -- 0.20 > 0.08*1.5=0.12, so False; bar 4 is back
+        # to normal (0.02 <= 0.08*1.5) even though the average is still
+        # spike-elevated, so True again.
+        highs = [101, 101, 101, 110, 101]
+        lows = [99, 99, 99, 90, 99]
+        closes = [100, 100, 100, 100, 100]
+        result = ut.volatility_regime_ok(highs, lows, closes, atr_period=1, lookback=3, max_ratio=1.5)
+        self.assertEqual(result, [False, False, True, False, True])
+
 
 class TestFindUtBotConfirmedTrades(unittest.TestCase):
     """User-specified variant (not part of the original Pine Script):

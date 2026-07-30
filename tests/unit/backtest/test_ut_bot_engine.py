@@ -132,6 +132,24 @@ class TestRunUtBotBacktest(unittest.TestCase):
         self.assertAlmostEqual(result["trades"][0]["fill_price"], 11.01)
         self.assertAlmostEqual(result["trades"][1]["fill_price"], 5.49)
 
+    def test_no_regime_filter_by_default(self):
+        # vol_filter_lookback defaults to None -- identical to
+        # test_single_trade_sized_and_closed_correctly's result.
+        result = run_ut_bot_backtest(_bars(), 100_000, key_value=1.0, atr_period=1)
+        self.assertEqual(len(result["trades"]), 2)
+
+    def test_regime_filter_wired_through_to_signal_layer(self):
+        # lookback (1000) far exceeds this 8-bar fixture -- see
+        # test_ut_bot_signals.TestFindUtBotLongTrades for why that
+        # suppresses every entry. Confirms run_ut_bot_backtest actually
+        # passes vol_filter_* down to find_ut_bot_long_trades rather than
+        # silently ignoring them.
+        result = run_ut_bot_backtest(
+            _bars(), 100_000, key_value=1.0, atr_period=1,
+            vol_filter_lookback=1000, vol_filter_atr_period=1,
+        )
+        self.assertEqual(result, {"trades": [], "equity_curve": []})
+
 
 class TestRunUtBotConfirmedBacktestCommission(unittest.TestCase):
     def test_no_commission_modeled_by_default(self):
