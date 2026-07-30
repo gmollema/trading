@@ -150,6 +150,47 @@ class TestRunUtBotBacktest(unittest.TestCase):
         )
         self.assertEqual(result, {"trades": [], "equity_curve": []})
 
+    def test_no_partial_profit_management_by_default(self):
+        # partial_profit_trigger_r defaults to None -- exactly two trade
+        # rows (BUY entry, SELL exit), same as every other test above.
+        result = run_ut_bot_backtest(_bars(), 100_000, key_value=1.0, atr_period=1)
+        self.assertEqual(len(result["trades"]), 2)
+
+    def test_partial_profit_and_breakeven_produce_two_sized_sell_fills(self):
+        # Same 9-bar fixture as test_ut_bot_signals'
+        # test_partial_then_breakeven_stop_on_a_later_bar: entry @ 11 (idx
+        # 4, stop 6, R=5), partial (1/3) fires @ 16.0 (idx 5), remainder
+        # exits at breakeven (11) on idx 8's low touch.
+        h = [10, 11, 9, 8, 12, 17, 15, 13, 12]
+        l = [8, 9, 6, 6, 7, 12, 11.5, 11.2, 10.5]
+        c = [9, 10, 7, 7.5, 11, 15, 13, 12, 11.8]
+        dates = list(pd.date_range("2024-01-02", periods=len(c), freq="h", tz="UTC"))
+        bars = {"high": h, "low": l, "close": c, "date": dates}
+
+        result = run_ut_bot_backtest(
+            bars, 100_000, key_value=1.0, atr_period=1, partial_profit_trigger_r=1.0, partial_profit_fraction=1 / 3,
+        )
+        trades = result["trades"]
+        self.assertEqual(len(trades), 3)  # BUY entry + 2 SELL fills
+        buy, partial_sell, final_sell = trades
+
+        self.assertEqual(buy["side"], "BUY")
+        size = buy["size"]
+
+        self.assertEqual(partial_sell["side"], "SELL")
+        self.assertEqual(partial_sell["fill_price"], 16.0)
+        self.assertEqual(partial_sell["reason"], "partial_profit")
+        expected_partial_qty = round(size / 3)  # whole units by default
+        self.assertEqual(partial_sell["size"], expected_partial_qty)
+
+        self.assertEqual(final_sell["side"], "SELL")
+        self.assertEqual(final_sell["fill_price"], 11)
+        self.assertEqual(final_sell["reason"], "breakeven_stop")
+        self.assertEqual(final_sell["size"], size - expected_partial_qty)  # last fill takes the remainder
+
+        expected_equity = 100_000 + (16.0 - 11) * expected_partial_qty + (11 - 11) * (size - expected_partial_qty)
+        self.assertAlmostEqual(result["equity_curve"][-1]["equity"], expected_equity, places=6)
+
 
 class TestRunUtBotConfirmedBacktestCommission(unittest.TestCase):
     def test_no_commission_modeled_by_default(self):
