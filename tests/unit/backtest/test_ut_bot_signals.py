@@ -246,6 +246,62 @@ class TestFindUtBotLongTradesPartialProfitAndBreakeven(unittest.TestCase):
         self.assertEqual(trade["fills"], [{"idx": 7, "date": 7, "price": 5.5, "qty_fraction": 1.0, "reason": "sell_signal"}])
 
 
+class TestLatestLongEntrySignal(unittest.TestCase):
+    """Reuses TestFindUtBotLongTrades' fixture, truncated to end exactly
+    on the entry bar (idx 4) -- the live equivalent of "the entry would
+    trigger on the bar we just fetched"."""
+
+    H = [10, 11, 9, 8, 12, 11.5, 10, 8]
+    L = [8, 9, 6, 6, 7, 9, 7, 5]
+    C = [9, 10, 7, 7.5, 11, 9.5, 7.2, 5.5]
+
+    def test_returns_the_trade_when_entry_is_on_the_last_bar(self):
+        truncated = _bars(self.H[:5], self.L[:5], self.C[:5])
+        signal = ut.latest_long_entry_signal(truncated, key_value=1.0, atr_period=1)
+        self.assertIsNotNone(signal)
+        self.assertEqual(signal["entry_idx"], 4)
+        self.assertEqual(signal["entry_price"], 11)
+        self.assertAlmostEqual(signal["stop_at_entry"], 6.0)
+
+    def test_none_when_the_last_bar_is_not_an_entry(self):
+        # One bar further -- idx 4 is still the entry, but it's no longer
+        # the LAST bar, so this must not fire again.
+        truncated = _bars(self.H[:6], self.L[:6], self.C[:6])
+        self.assertIsNone(ut.latest_long_entry_signal(truncated, key_value=1.0, atr_period=1))
+
+    def test_regime_filter_can_suppress_the_latest_entry(self):
+        # Same lookback=1000-exceeds-history case as the engine/signal
+        # regime-filter tests -- every bar is "not ok", so even a
+        # last-bar entry must be suppressed.
+        truncated = _bars(self.H[:5], self.L[:5], self.C[:5])
+        signal = ut.latest_long_entry_signal(
+            truncated, key_value=1.0, atr_period=1, vol_filter_lookback=1000, vol_filter_atr_period=1,
+        )
+        self.assertIsNone(signal)
+
+    def test_empty_bars_returns_none(self):
+        self.assertIsNone(ut.latest_long_entry_signal(_bars([], [], [])))
+
+
+class TestLatestSellSignal(unittest.TestCase):
+    H = [10, 11, 9, 8, 12, 11.5, 10, 8]
+    L = [8, 9, 6, 6, 7, 9, 7, 5]
+    C = [9, 10, 7, 7.5, 11, 9.5, 7.2, 5.5]
+
+    def test_true_when_the_last_bar_is_a_crossunder(self):
+        # Full 8-bar fixture: the crossunder is at idx 7, the last bar.
+        self.assertTrue(ut.latest_sell_signal(_bars(self.H, self.L, self.C), key_value=1.0, atr_period=1))
+
+    def test_false_when_the_last_bar_is_not_a_crossunder(self):
+        # Truncate right at the entry bar -- idx 4 is neither a cross nor
+        # anywhere near one.
+        truncated = _bars(self.H[:5], self.L[:5], self.C[:5])
+        self.assertFalse(ut.latest_sell_signal(truncated, key_value=1.0, atr_period=1))
+
+    def test_empty_bars_returns_false(self):
+        self.assertFalse(ut.latest_sell_signal(_bars([], [], [])))
+
+
 class TestTrailingAverage(unittest.TestCase):
     def test_none_until_lookback_bars_exist(self):
         self.assertEqual(ut._trailing_average([1, 2, 3, 4, 5], lookback=3), [None, None, 2.0, 3.0, 4.0])

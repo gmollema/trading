@@ -1,0 +1,41 @@
+{
+  "strategy_name": "UT Bot ATR Trailing Stop",
+  "direction": "long_only",
+  "trade_timeframe": "1h",
+  "pairs": {
+    "USDJPY": {
+      "validated": true,
+      "key_value": 3.0,
+      "atr_period": 5,
+      "vol_filter_lookback": 500,
+      "vol_filter_max_ratio": 1.5,
+      "vol_filter_atr_period": 14
+    },
+    "EURUSD": {
+      "validated": false,
+      "key_value": 4.0,
+      "atr_period": 5,
+      "vol_filter_lookback": null,
+      "vol_filter_max_ratio": 1.5,
+      "vol_filter_atr_period": 14
+    },
+    "USDCAD": {
+      "validated": false,
+      "key_value": 4.0,
+      "atr_period": 10,
+      "vol_filter_lookback": null,
+      "vol_filter_max_ratio": 1.5,
+      "vol_filter_atr_period": 14
+    }
+  },
+  "partial_profit": {
+    "enabled": false,
+    "trigger_R": 1.0,
+    "fraction": 0.3333
+  },
+  "risk": {
+    "max_risk_per_trade_pct": 1.0,
+    "max_position_size_pct_of_portfolio": 30,
+    "max_concurrent_positions": 3
+  }
+}
