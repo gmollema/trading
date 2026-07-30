@@ -164,6 +164,87 @@ class TestFindUtBotLongTrades(unittest.TestCase):
         self.assertEqual(len(trades), 1)
         self.assertEqual(trades[0]["entry_idx"], 4)
 
+    def test_no_partial_profit_management_by_default(self):
+        # partial_profit_trigger_r defaults to None -- identical to
+        # test_full_round_trip's result, no "fills" key at all.
+        trades = ut.find_ut_bot_long_trades(_bars(self.H, self.L, self.C), key_value=1.0, atr_period=1)
+        self.assertEqual(len(trades), 1)
+        self.assertNotIn("fills", trades[0])
+
+
+class TestFindUtBotLongTradesPartialProfitAndBreakeven(unittest.TestCase):
+    """Entry @ 11 (idx 4, stop 6.0, R=5.0) is the same setup as
+    TestFindUtBotLongTrades' fixture; partial_profit_trigger_r=1.0 ->
+    1R partial target = 11 + 1.0*5.0 = 16.0, checked via each bar's HIGH
+    (an intrabar favorable touch). Each fixture below was hand-derived
+    from atr_trailing_stop/crossunder's own documented mechanics, same as
+    the confirmed-entry fixtures above."""
+
+    def test_partial_then_breakeven_stop_on_a_later_bar(self):
+        # idx5's high (17) touches the 16.0 target -> partial fires,
+        # taking 1/3 off and arming a breakeven floor at 11 for the rest.
+        # No crossunder ever fires; idx8's low (10.5) is the first bar to
+        # dip to/through 11 -- the remaining 2/3 exits there via
+        # "breakeven_stop", not "sell_signal".
+        h = [10, 11, 9, 8, 12, 17, 15, 13, 12]
+        l = [8, 9, 6, 6, 7, 12, 11.5, 11.2, 10.5]
+        c = [9, 10, 7, 7.5, 11, 15, 13, 12, 11.8]
+        trades = ut.find_ut_bot_long_trades(
+            _bars(h, l, c), key_value=1.0, atr_period=1, partial_profit_trigger_r=1.0, partial_profit_fraction=1 / 3,
+        )
+        self.assertEqual(len(trades), 1)
+        trade = trades[0]
+        self.assertEqual(trade["entry_idx"], 4)
+        self.assertEqual(trade["exit_idx"], 8)
+        self.assertEqual(trade["exit_price"], 11)
+        self.assertEqual(trade["reason"], "breakeven_stop")
+
+        fills = trade["fills"]
+        self.assertEqual(len(fills), 2)
+        self.assertEqual(fills[0], {"idx": 5, "date": 5, "price": 16.0, "qty_fraction": 1 / 3, "reason": "partial_profit"})
+        self.assertEqual(fills[1]["idx"], 8)
+        self.assertEqual(fills[1]["price"], 11)
+        self.assertEqual(fills[1]["reason"], "breakeven_stop")
+        self.assertAlmostEqual(fills[1]["qty_fraction"], 2 / 3, places=6)
+
+    def test_partial_then_ordinary_crossunder_above_breakeven(self):
+        # Same 1R=16.0 partial target, touched at idx5, but this time
+        # price keeps running (low never dips to 11) and the position
+        # rides the trailing stop up before a genuine crossunder closes
+        # the remainder at idx8 (close 13 < stop 16.5) -- "sell_signal",
+        # not "breakeven_stop", since the breakeven floor was never hit.
+        h = [10, 11, 9, 8, 12, 17, 20, 18, 15]
+        l = [8, 9, 6, 6, 7, 13, 17, 14, 12]
+        c = [9, 10, 7, 7.5, 11, 15, 19, 15.5, 13]
+        trades = ut.find_ut_bot_long_trades(
+            _bars(h, l, c), key_value=1.0, atr_period=1, partial_profit_trigger_r=1.0, partial_profit_fraction=1 / 3,
+        )
+        self.assertEqual(len(trades), 1)
+        trade = trades[0]
+        self.assertEqual(trade["exit_idx"], 8)
+        self.assertEqual(trade["exit_price"], 13)
+        self.assertEqual(trade["reason"], "sell_signal")
+
+        fills = trade["fills"]
+        self.assertEqual(len(fills), 2)
+        self.assertEqual(fills[0]["reason"], "partial_profit")
+        self.assertEqual(fills[1], {"idx": 8, "date": 8, "price": 13, "qty_fraction": round(2 / 3, 6), "reason": "sell_signal"})
+
+    def test_partial_never_triggers_produces_a_single_full_fraction_fill(self):
+        # The original (unmanaged) 8-bar fixture never reaches a 1R
+        # target as high as 16.0 -- the ordinary crossunder at idx7
+        # closes the FULL position in one fill, fraction 1.0.
+        h = [10, 11, 9, 8, 12, 11.5, 10, 8]
+        l = [8, 9, 6, 6, 7, 9, 7, 5]
+        c = [9, 10, 7, 7.5, 11, 9.5, 7.2, 5.5]
+        trades = ut.find_ut_bot_long_trades(
+            _bars(h, l, c), key_value=1.0, atr_period=1, partial_profit_trigger_r=1.0, partial_profit_fraction=1 / 3,
+        )
+        self.assertEqual(len(trades), 1)
+        trade = trades[0]
+        self.assertEqual(trade["reason"], "sell_signal")
+        self.assertEqual(trade["fills"], [{"idx": 7, "date": 7, "price": 5.5, "qty_fraction": 1.0, "reason": "sell_signal"}])
+
 
 class TestTrailingAverage(unittest.TestCase):
     def test_none_until_lookback_bars_exist(self):

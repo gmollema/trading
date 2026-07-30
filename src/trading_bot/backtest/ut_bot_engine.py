@@ -31,6 +31,14 @@ through to ut_bot_signals.find_ut_bot_long_trades / .volatility_regime_ok
 diagnosed a single bad USDJPY stretch driven by an abnormal volatility
 spike, not chop or a trend a simpler filter could catch). Off by default
 (vol_filter_lookback=None).
+
+Partial profit + breakeven: run_ut_bot_backtest passes
+partial_profit_trigger_r/_fraction straight through to
+ut_bot_signals.find_ut_bot_long_trades -- see that function's docstring
+for the exact mechanics (take a fraction off at an R-multiple target,
+move the remainder's stop to breakeven at the same moment, same
+combined-trigger convention as smc_signals' tp1). Off by default
+(partial_profit_trigger_r=None), same convention as everything above.
 """
 
 from __future__ import annotations
@@ -39,6 +47,7 @@ from trading_bot.backtest import portfolio
 from trading_bot.backtest.ut_bot_signals import (
     DEFAULT_ATR_PERIOD,
     DEFAULT_KEY_VALUE,
+    DEFAULT_PARTIAL_PROFIT_FRACTION,
     DEFAULT_VOL_FILTER_ATR_PERIOD,
     DEFAULT_VOL_FILTER_MAX_RATIO,
     find_ut_bot_confirmed_trades,
@@ -77,6 +86,8 @@ def run_ut_bot_backtest(
     vol_filter_lookback: int | None = None,
     vol_filter_max_ratio: float = DEFAULT_VOL_FILTER_MAX_RATIO,
     vol_filter_atr_period: int = DEFAULT_VOL_FILTER_ATR_PERIOD,
+    partial_profit_trigger_r: float | None = None,
+    partial_profit_fraction: float = DEFAULT_PARTIAL_PROFIT_FRACTION,
 ) -> dict:
     """Simulate the UT Bot strategy over one symbol's bars (see
     ut_bot_signals.find_ut_bot_long_trades for `bars`' shape). Returns
@@ -112,9 +123,19 @@ def run_ut_bot_backtest(
     vol_filter_lookback: see ut_bot_signals.volatility_regime_ok -- passed
         straight through to find_ut_bot_long_trades. Left None (the
         default), no regime filter is applied.
+    partial_profit_trigger_r: see ut_bot_signals.find_ut_bot_long_trades's
+        identical parameter -- passed straight through. Left None (the
+        default), no partial-profit/breakeven management is applied and
+        each trade fills in exactly two rows (BUY entry, SELL exit) same
+        as before this was added. When set, a trade may instead produce
+        more than one SELL row (one per fill in the signal's "fills"
+        list), each sized as size * that fill's qty_fraction (the LAST
+        fill always takes whatever quantity remains, avoiding rounding
+        leftovers -- same convention as smc_engine.simulate_smc_portfolio).
     """
     signal_trades = find_ut_bot_long_trades(
         bars, key_value, atr_period, vol_filter_lookback, vol_filter_max_ratio, vol_filter_atr_period,
+        partial_profit_trigger_r, partial_profit_fraction,
     )
 
     equity = float(initial_capital)
@@ -132,9 +153,6 @@ def run_ut_bot_backtest(
             continue
 
         entry_fill_price = portfolio.fx_fill_price(entry_price, "BUY", half_spread) if half_spread else entry_price
-        exit_fill_price = (
-            portfolio.fx_fill_price(trade["exit_price"], "SELL", half_spread) if half_spread else trade["exit_price"]
-        )
 
         order_id += 1
         if fx_commission_bps is not None:
@@ -142,14 +160,27 @@ def run_ut_bot_backtest(
         trades_out.append(_trade_row(trade["entry_date"], symbol, "BUY", size, entry_fill_price, order_id, "entry"))
         equity_curve.append({"timestamp": trade["entry_date"].isoformat(), "equity": equity})
 
-        equity += (exit_fill_price - entry_fill_price) * size
-        if fx_commission_bps is not None:
-            equity -= portfolio.fx_commission(size * exit_fill_price, fx_commission_bps, fx_commission_min)
-        order_id += 1
-        trades_out.append(
-            _trade_row(trade["exit_date"], symbol, "SELL", size, exit_fill_price, order_id, trade["reason"])
-        )
-        equity_curve.append({"timestamp": trade["exit_date"].isoformat(), "equity": equity})
+        fills = trade.get("fills") or [
+            {"date": trade["exit_date"], "price": trade["exit_price"], "qty_fraction": 1.0, "reason": trade["reason"]}
+        ]
+        remaining_qty = size
+        for i, fill in enumerate(fills):
+            if i == len(fills) - 1:
+                fill_qty = remaining_qty
+            else:
+                fill_qty = round(size * fill["qty_fraction"], 6) if allow_fractional_shares else round(size * fill["qty_fraction"])
+                fill_qty = min(fill_qty, remaining_qty)
+            remaining_qty -= fill_qty
+            if fill_qty < min_size:
+                continue
+
+            fill_fill_price = portfolio.fx_fill_price(fill["price"], "SELL", half_spread) if half_spread else fill["price"]
+            equity += (fill_fill_price - entry_fill_price) * fill_qty
+            if fx_commission_bps is not None:
+                equity -= portfolio.fx_commission(fill_qty * fill_fill_price, fx_commission_bps, fx_commission_min)
+            order_id += 1
+            trades_out.append(_trade_row(fill["date"], symbol, "SELL", fill_qty, fill_fill_price, order_id, fill["reason"]))
+            equity_curve.append({"timestamp": fill["date"].isoformat(), "equity": equity})
 
     return {"trades": trades_out, "equity_curve": equity_curve}
 

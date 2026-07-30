@@ -183,6 +183,9 @@ def volatility_regime_ok(
     ]
 
 
+DEFAULT_PARTIAL_PROFIT_FRACTION = 1 / 3
+
+
 def find_ut_bot_long_trades(
     bars: dict,
     key_value: float = DEFAULT_KEY_VALUE,
@@ -190,6 +193,8 @@ def find_ut_bot_long_trades(
     vol_filter_lookback: int | None = None,
     vol_filter_max_ratio: float = DEFAULT_VOL_FILTER_MAX_RATIO,
     vol_filter_atr_period: int = DEFAULT_VOL_FILTER_ATR_PERIOD,
+    partial_profit_trigger_r: float | None = None,
+    partial_profit_fraction: float = DEFAULT_PARTIAL_PROFIT_FRACTION,
 ) -> list[dict]:
     """Long-only walk over one symbol's bars: enter on a buy crossover
     while flat, exit on a sell crossunder while in a position. Fills at
@@ -205,12 +210,36 @@ def find_ut_bot_long_trades(
             When set, a buy crossover is skipped (not just delayed -- a
             fresh crossover is required to try again) whenever
             volatility_regime_ok is False for that bar.
+        partial_profit_trigger_r: once price reaches entry_price +
+            partial_profit_trigger_r * (entry_price - stop_at_entry) --
+            checked via the bar's HIGH, an intrabar favorable touch, same
+            convention as smc_signals' tp1 -- take `partial_profit_fraction`
+            of the position off AND move the stop for the remainder to
+            breakeven (entry_price), both at once (mirrors smc_signals'
+            tp1, which also combines a partial with breakeven rather than
+            using two separate triggers). The remainder still exits on
+            the ordinary crossunder (sell_signal) OR an explicit
+            breakeven-stop touch (bar's LOW <= entry_price), whichever
+            comes first -- a resting stop fills intrabar, before a
+            close-based crossunder signal could even be known. Left None
+            (the default), no partial/breakeven management is applied at
+            all and the returned trade has no "fills" key, identical to
+            every previously-reported result.
 
     Returns:
         list of {"entry_idx", "entry_date", "entry_price", "stop_at_entry",
         "exit_idx", "exit_date", "exit_price", "reason"} -- one dict per
-        completed round trip. A position still open at the end of the
-        data closes at the last bar's close with reason "end_of_data".
+        completed round trip; entry/exit describe the FULL position's
+        entry and FINAL exit even when partial_profit_trigger_r is set.
+        A position still open at the end of the data closes at the last
+        bar's close with reason "end_of_data".
+
+        When partial_profit_trigger_r is set, each trade also gets a
+        "fills" key: a list of {"idx", "date", "price", "qty_fraction",
+        "reason"} covering the partial (if triggered) and the final exit,
+        with qty_fraction summing to 1.0 -- existing consumers that only
+        read entry_idx/entry_price/stop_at_entry/exit_idx/exit_price/
+        reason are unaffected either way.
     """
     highs, lows, closes, dates = bars["high"], bars["low"], bars["close"], bars["date"]
     n = len(closes)
@@ -225,9 +254,21 @@ def find_ut_bot_long_trades(
         if vol_filter_lookback is not None
         else [True] * n
     )
+    manage_exits = partial_profit_trigger_r is not None
 
     trades: list[dict] = []
     open_trade: dict | None = None
+    fills: list[dict] = []
+    partial_taken = False
+    partial_target = None
+
+    def _close(i: int, exit_price: float, reason: str) -> None:
+        trade_out = {**open_trade, "exit_idx": i, "exit_date": dates[i], "exit_price": exit_price, "reason": reason}
+        if manage_exits:
+            remaining_fraction = round(1 - partial_profit_fraction, 6) if partial_taken else 1.0
+            fills.append({"idx": i, "date": dates[i], "price": exit_price, "qty_fraction": remaining_fraction, "reason": reason})
+            trade_out["fills"] = fills
+        trades.append(trade_out)
 
     for i in range(n):
         if open_trade is None:
@@ -238,19 +279,32 @@ def find_ut_bot_long_trades(
                     "entry_price": closes[i],
                     "stop_at_entry": stop[i],
                 }
-        else:
-            if sell_signal[i]:
-                trades.append({
-                    **open_trade,
-                    "exit_idx": i, "exit_date": dates[i], "exit_price": closes[i], "reason": "sell_signal",
-                })
-                open_trade = None
+                fills = []
+                partial_taken = False
+                r = open_trade["entry_price"] - open_trade["stop_at_entry"]
+                partial_target = (
+                    open_trade["entry_price"] + partial_profit_trigger_r * r
+                    if manage_exits and r > 0
+                    else None
+                )
+            continue
+
+        if manage_exits and not partial_taken and partial_target is not None and highs[i] >= partial_target:
+            fills.append({
+                "idx": i, "date": dates[i], "price": partial_target,
+                "qty_fraction": partial_profit_fraction, "reason": "partial_profit",
+            })
+            partial_taken = True
+
+        if partial_taken and lows[i] <= open_trade["entry_price"]:
+            _close(i, open_trade["entry_price"], "breakeven_stop")
+            open_trade = None
+        elif sell_signal[i]:
+            _close(i, closes[i], "sell_signal")
+            open_trade = None
 
     if open_trade is not None:
-        trades.append({
-            **open_trade,
-            "exit_idx": n - 1, "exit_date": dates[n - 1], "exit_price": closes[n - 1], "reason": "end_of_data",
-        })
+        _close(n - 1, closes[n - 1], "end_of_data")
 
     return trades
 
