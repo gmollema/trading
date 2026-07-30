@@ -125,10 +125,71 @@ def crossunder(series: list[float], reference: list[float]) -> list[bool]:
     return [i > 0 and series[i - 1] >= reference[i - 1] and series[i] < reference[i] for i in range(n)]
 
 
+DEFAULT_VOL_FILTER_ATR_PERIOD = 14
+DEFAULT_VOL_FILTER_LOOKBACK = 500
+DEFAULT_VOL_FILTER_MAX_RATIO = 1.5
+
+
+def _trailing_average(values: list[float], lookback: int) -> list[float | None]:
+    """Simple trailing mean over the last `lookback` values, None until
+    enough history exists (bars 0..lookback-2) -- a plain sliding-window
+    sum, not pandas, to match this module's no-dependencies style."""
+    n = len(values)
+    result: list[float | None] = [None] * n
+    window_sum = 0.0
+    for i in range(n):
+        window_sum += values[i]
+        if i >= lookback:
+            window_sum -= values[i - lookback]
+        if i >= lookback - 1:
+            result[i] = window_sum / lookback
+    return result
+
+
+def volatility_regime_ok(
+    highs: list[float],
+    lows: list[float],
+    closes: list[float],
+    atr_period: int = DEFAULT_VOL_FILTER_ATR_PERIOD,
+    lookback: int = DEFAULT_VOL_FILTER_LOOKBACK,
+    max_ratio: float = DEFAULT_VOL_FILTER_MAX_RATIO,
+) -> list[bool]:
+    """True at bar i when current ATR(atr_period)-as-a-fraction-of-price is
+    within `max_ratio` of its own trailing `lookback`-bar average -- i.e.
+    volatility hasn't spiked to an abnormal regime relative to this
+    symbol's own recent history. False for the first `lookback` bars (no
+    trailing average yet) and during a detected spike.
+
+    Motivated by USDJPY's long-only backtest: a walk-forward pass found
+    one bad stretch (Dec 2024-May 2025, the BOJ carry-trade-unwind period)
+    where ATR(14)-as-%-of-price ran ~50% above its usual level (0.20% vs
+    a 0.135% baseline) while a sustained downtrend kept stopping out long
+    entries. A naive "only go long above a long-term SMA" trend filter
+    was tried first and made things WORSE overall (it also cut genuinely
+    profitable trades in unrelated, calmer windows) -- this volatility-
+    ratio filter is more surgical: on the same walk-forward folds it left
+    6 of 7 windows' trades completely untouched while cutting the bad
+    fold's loss roughly in half and improving total P&L across all folds
+    (deliberately independent of `atr_period` -- the strategy's own
+    trailing-stop parameter, which can be as short as 1 -- since ATR(14)
+    is a steadier, more standard volatility yardstick for this purpose)."""
+    n = len(closes)
+    atr = wilder_atr(highs, lows, closes, atr_period)
+    atr_pct = [a / c if c else 0.0 for a, c in zip(atr, closes)]
+    trailing_avg = _trailing_average(atr_pct, lookback)
+    return [
+        avg is not None and avg > 0 and atr_pct[i] <= avg * max_ratio
+        for i, avg in enumerate(trailing_avg)
+    ]
+
+
 def find_ut_bot_long_trades(
     bars: dict,
     key_value: float = DEFAULT_KEY_VALUE,
     atr_period: int = DEFAULT_ATR_PERIOD,
+    vol_filter_lookback: int | None = None,
+    vol_filter_max_ratio: float = DEFAULT_VOL_FILTER_MAX_RATIO,
+    vol_filter_atr_period: int = DEFAULT_VOL_FILTER_ATR_PERIOD,
 ) -> list[dict]:
     """Long-only walk over one symbol's bars: enter on a buy crossover
     while flat, exit on a sell crossunder while in a position. Fills at
@@ -138,6 +199,12 @@ def find_ut_bot_long_trades(
     Args:
         bars: {"high": [...], "low": [...], "close": [...], "date": [...]}
             -- equal-length lists, chronologically sorted.
+        vol_filter_lookback: see volatility_regime_ok. Left None (the
+            default), no regime filter is applied at all -- every result
+            already reported for this strategy is on an unfiltered basis.
+            When set, a buy crossover is skipped (not just delayed -- a
+            fresh crossover is required to try again) whenever
+            volatility_regime_ok is False for that bar.
 
     Returns:
         list of {"entry_idx", "entry_date", "entry_price", "stop_at_entry",
@@ -153,13 +220,18 @@ def find_ut_bot_long_trades(
     stop = atr_trailing_stop(highs, lows, closes, key_value, atr_period)
     buy_signal = crossover(closes, stop)
     sell_signal = crossunder(closes, stop)
+    regime_ok = (
+        volatility_regime_ok(highs, lows, closes, vol_filter_atr_period, vol_filter_lookback, vol_filter_max_ratio)
+        if vol_filter_lookback is not None
+        else [True] * n
+    )
 
     trades: list[dict] = []
     open_trade: dict | None = None
 
     for i in range(n):
         if open_trade is None:
-            if buy_signal[i]:
+            if buy_signal[i] and regime_ok[i]:
                 open_trade = {
                     "entry_idx": i,
                     "entry_date": dates[i],

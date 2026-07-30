@@ -24,6 +24,13 @@ NOT a verified fixed schedule -- IBKR IDEALPRO passes through live
 interbank quotes, so real spread varies continuously. portfolio.
 FX_TYPICAL_SPREAD_PIPS is only a ballpark planning figure; see its
 docstring. Off by default (spread_pips=None).
+
+Volatility regime filter: run_ut_bot_backtest passes vol_filter_* straight
+through to ut_bot_signals.find_ut_bot_long_trades / .volatility_regime_ok
+-- see that function's docstring for what it does and why (a walk-forward
+diagnosed a single bad USDJPY stretch driven by an abnormal volatility
+spike, not chop or a trend a simpler filter could catch). Off by default
+(vol_filter_lookback=None).
 """
 
 from __future__ import annotations
@@ -32,6 +39,8 @@ from trading_bot.backtest import portfolio
 from trading_bot.backtest.ut_bot_signals import (
     DEFAULT_ATR_PERIOD,
     DEFAULT_KEY_VALUE,
+    DEFAULT_VOL_FILTER_ATR_PERIOD,
+    DEFAULT_VOL_FILTER_MAX_RATIO,
     find_ut_bot_confirmed_trades,
     find_ut_bot_long_trades,
 )
@@ -65,6 +74,9 @@ def run_ut_bot_backtest(
     fx_commission_bps: float | None = None,
     fx_commission_min: float = portfolio.FX_COMMISSION_MIN_USD,
     spread_pips: float | None = None,
+    vol_filter_lookback: int | None = None,
+    vol_filter_max_ratio: float = DEFAULT_VOL_FILTER_MAX_RATIO,
+    vol_filter_atr_period: int = DEFAULT_VOL_FILTER_ATR_PERIOD,
 ) -> dict:
     """Simulate the UT Bot strategy over one symbol's bars (see
     ut_bot_signals.find_ut_bot_long_trades for `bars`' shape). Returns
@@ -97,8 +109,13 @@ def run_ut_bot_backtest(
         fx_commission_bps's verified rate, portfolio.FX_TYPICAL_SPREAD_PIPS
         is only a ballpark planning figure, so this stays opt-in rather
         than silently defaulting to an assumed number.
+    vol_filter_lookback: see ut_bot_signals.volatility_regime_ok -- passed
+        straight through to find_ut_bot_long_trades. Left None (the
+        default), no regime filter is applied.
     """
-    signal_trades = find_ut_bot_long_trades(bars, key_value, atr_period)
+    signal_trades = find_ut_bot_long_trades(
+        bars, key_value, atr_period, vol_filter_lookback, vol_filter_max_ratio, vol_filter_atr_period,
+    )
 
     equity = float(initial_capital)
     trades_out: list[dict] = []
