@@ -136,10 +136,15 @@ def find_smc_long_trades(
 
     Returns:
         list of dicts: {entry_idx, entry_date, entry_price, stop_price,
-        ob_idx, tp1_price (or None), fills: [{"idx","date","price","qty_
-        fraction","reason"}, ...]} -- qty_fraction sums to 1.0 across a
-        trade's fills (0.25 at TP1 then 0.75 at exit, or 1.0 in one fill
-        for a stop-out / no-TP1 exit).
+        initial_stop_price, ob_idx, tp1_price (or None), fills: [{"idx",
+        "date","price","qty_fraction","reason"}, ...]} -- qty_fraction sums
+        to 1.0 across a trade's fills (0.25 at TP1 then 0.75 at exit, or
+        1.0 in one fill for a stop-out / no-TP1 exit). `stop_price` is
+        live exit-management state -- it moves to breakeven once TP1
+        fills, so it does NOT describe the entry-time risk distance for a
+        trade that reaches TP1. `initial_stop_price` is set once at entry
+        and never mutated; anything computing entry-time risk (e.g.
+        position sizing) must use `initial_stop_price`, not `stop_price`.
     """
     opens, highs, lows, closes, dates = bars["open"], bars["high"], bars["low"], bars["close"], bars["date"]
     n = len(closes)
@@ -269,7 +274,8 @@ def find_smc_long_trades(
 
                     open_trade = {
                         "entry_idx": i, "entry_date": dates[i], "entry_price": entry_price,
-                        "stop_price": stop_price, "ob_idx": ob["ob_idx"], "tp1_price": tp1_price,
+                        "stop_price": stop_price, "initial_stop_price": stop_price,
+                        "ob_idx": ob["ob_idx"], "tp1_price": tp1_price,
                         "tp1_done": False, "remaining_fraction": 1.0, "fills": [],
                     }
                     pending_bull_obs.remove(ob)  # mitigated -- first retest consumed it

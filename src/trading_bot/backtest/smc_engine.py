@@ -241,7 +241,12 @@ def simulate_smc_portfolio(
             continue
 
         entry_price = trade["entry_price"]
-        stop_price = trade["stop_price"]
+        # initial_stop_price, NOT stop_price: find_smc_long_trades moves
+        # stop_price to breakeven in place once TP1 fills, so by the time
+        # this pre-built candidate reaches the portfolio sim, stop_price
+        # no longer reflects the entry-time risk distance for any trade
+        # that went on to hit TP1 (see smc_signals.find_smc_long_trades).
+        stop_price = trade["initial_stop_price"]
         size = portfolio.position_size(
             equity, risk_pct, entry_price, stop_price, max_position_pct, allow_fractional_shares,
         )
