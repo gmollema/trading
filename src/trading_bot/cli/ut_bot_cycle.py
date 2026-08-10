@@ -50,14 +50,28 @@ Known live-vs-backtest deviations (accepted for paper validation):
   - yfinance FX bars can lag or gap; a pair with a stale last bar is
     skipped fail-closed that cycle (see _bars_are_fresh).
 
-Known gap, not yet resolved: IBKR IDEALPRO's actual minimum order size /
-lot-size increment for a paper (or real) forex account has NOT been
-verified against this bot's sized quantities (portfolio.position_size's
-raw unit count, floored to a whole number the same way the equity bots
-floor to a whole share -- nothing FX-specific). If that floored size
-comes out smaller than IDEALPRO's real minimum, entries will be rejected
-by the broker rather than silently mis-sized -- worth confirming against
-a real paper-account order before trusting this unattended.
+VERIFIED against a real paper-account order (2026-07-31): IDEALPRO's
+minimum order size is USD 25,000 notional -- IBKR's own rejection
+message for a smaller test order was "Warning 399: Your order size is
+below the USD 25000 IdealPro minimum and will be routed as an odd lot
+order." portfolio.position_size's raw sized quantity is NOT checked
+against this anywhere in this module -- a signal that sizes below 25,000
+units of the base currency will still attempt an order, which IBKR will
+either odd-lot-route or reject depending on account settings (see the
+next paragraph). Worth adding an explicit floor/skip before this runs
+unattended.
+
+BLOCKING, discovered by the same test: this account currently rejects
+ALL forex orders outright with "Error 201: FX trade would expose account
+to currency leverage" -- an IBKR ACCOUNT-LEVEL permission/setting, not a
+bug in this module's order-placement code (confirmed with both a market
+and a limit order, both rejected identically). This needs to be resolved
+in IBKR's own account configuration (enabling whatever margin/FX trading
+permission this paper account is currently missing) before this bot can
+place a single real order, paper or otherwise -- everything else in this
+module (connection, data fetch, signal detection, contract qualification)
+has been confirmed working end-to-end; order placement is the one piece
+still blocked, and it's blocked outside this codebase entirely.
 """
 
 from __future__ import annotations
