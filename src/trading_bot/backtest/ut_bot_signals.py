@@ -309,6 +309,60 @@ def find_ut_bot_long_trades(
     return trades
 
 
+def latest_long_entry_signal(
+    bars: dict,
+    key_value: float = DEFAULT_KEY_VALUE,
+    atr_period: int = DEFAULT_ATR_PERIOD,
+    vol_filter_lookback: int | None = None,
+    vol_filter_max_ratio: float = DEFAULT_VOL_FILTER_MAX_RATIO,
+    vol_filter_atr_period: int = DEFAULT_VOL_FILTER_ATR_PERIOD,
+) -> dict | None:
+    """If find_ut_bot_long_trades' entry condition would trigger on the
+    LAST bar of `bars`, return that trade dict (entry_price, stop_at_entry);
+    else None. For live use (cli/ut_bot_cycle.py): re-runs the exact
+    backtest-validated signal walk over freshly-fetched bars and checks
+    entry_idx == n-1, the same pattern smc_signals.latest_entry_signal
+    uses, rather than reimplementing the crossover/regime-filter logic
+    separately for live use -- one source of truth for entries.
+
+    Deliberately does NOT pass partial_profit_trigger_r through: that
+    only affects fills after entry, never whether bar n-1 itself is an
+    entry, so it's irrelevant here and skipping it keeps this function's
+    signature matched to exactly what live entry-checking needs."""
+    n = len(bars["close"])
+    if n == 0:
+        return None
+    for trade in find_ut_bot_long_trades(
+        bars, key_value, atr_period, vol_filter_lookback, vol_filter_max_ratio, vol_filter_atr_period,
+    ):
+        if trade["entry_idx"] == n - 1:
+            return trade
+    return None
+
+
+def latest_sell_signal(bars: dict, key_value: float = DEFAULT_KEY_VALUE, atr_period: int = DEFAULT_ATR_PERIOD) -> bool:
+    """True if the plain crossunder fires on the LAST bar of `bars` -- for
+    live use managing an ALREADY-OPEN long position (cli/ut_bot_cycle.py).
+
+    Deliberately independent of find_ut_bot_long_trades' own flat/
+    in-position walk, which assumes it started flat at bars[0] -- a live
+    position may have been entered on an earlier fetch whose history
+    isn't necessarily identical to this cycle's freshly-fetched window,
+    so this checks the crossunder condition directly rather than trusting
+    that a fresh replay's internal state lines up with the real open
+    position. Only the plain (unmanaged) exit rule -- no breakeven-stop
+    check here, since the live runner doesn't enable partial-profit
+    management (see ut_bot_engine.py's docstring on why: it doesn't help
+    the validated USDJPY edge)."""
+    highs, lows, closes = bars["high"], bars["low"], bars["close"]
+    n = len(closes)
+    if n == 0:
+        return False
+    stop = atr_trailing_stop(highs, lows, closes, key_value, atr_period)
+    sell = crossunder(closes, stop)
+    return sell[-1]
+
+
 def find_ut_bot_confirmed_trades(
     bars: dict,
     key_value: float = DEFAULT_KEY_VALUE,
