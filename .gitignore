@@ -16,6 +16,9 @@ smc_open_positions.json
 smc-safety-check-log.json
 smc_watchlist.txt
 
+# UT Bot runtime state (mirrors the gap-and-go / SMC bots' ignored state files)
+ut_bot_open_positions.json
+
 # IDE / test cache / local Claude Code settings -- machine-specific, not shared
 .idea/
 .pytest_cache/
