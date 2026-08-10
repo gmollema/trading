@@ -12,6 +12,7 @@
     "max_trades_per_day": 40
   },
   "reactive_derisk": {
+    "_note": "Confirmed inert over the most recent ~1yr walk-forward (2025-07 to 2026-07, clean full-SP500 re-sweep): trailing PF never dropped below pf_threshold in any fold, so this never triggered and made exactly 0.00pp difference vs no-derisk baseline in every fold's test period. Kept as a starting point for a genuinely bad stretch (the scenario it was designed for), not because it's been proven to help -- see git history around commit d94a548 and smc_engine.simulate_smc_portfolio's docstring for the original tuning caveats.",
     "window": 200,
     "pf_threshold": 0.8,
     "size_mult": 0.3
