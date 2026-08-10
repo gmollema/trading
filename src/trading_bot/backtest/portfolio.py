@@ -76,6 +76,88 @@ def fractional_commission(
     return max(qty * price * pct_of_notional, minimum)
 
 
+# IBKR IDEALPRO forex commission, Tier I (retail; applies up to $1B of
+# combined monthly spot-currency trade value, which covers every account
+# this codebase is built for): 0.20 basis points of trade notional, with
+# a $2.00 minimum per order. Verified against IBKR's published forex
+# commission schedule (2026-07). This is a completely different cost
+# structure from the per-share equity schedules above (commission() /
+# fractional_commission()) -- FX commission is priced off notional trade
+# value, not share count, so those must not be reused for FX fills.
+FX_COMMISSION_BPS = 0.20
+FX_COMMISSION_MIN_USD = 2.00
+
+
+def fx_commission(notional: float, bps: float = FX_COMMISSION_BPS, minimum: float = FX_COMMISSION_MIN_USD) -> float:
+    """IBKR IDEALPRO's forex commission: bps/10000 * notional, or
+    `minimum`, whichever is greater. Applies once per FILL (each BUY or
+    SELL execution), same per-execution billing as commission()/
+    fractional_commission() above.
+
+    `notional` should be qty * price in USD. For a USD-quote pair
+    (EURUSD, GBPUSD, AUDUSD, NZDUSD -- price is USD per unit of base
+    currency) qty * price IS the USD notional exactly. For a USD-BASE
+    pair (USDJPY, USDCAD, USDCHF -- price is quote-currency per USD),
+    qty * price is actually quote-currency notional, not USD -- true to a
+    real IBKR fill this would need converting at the prevailing USD/quote
+    rate, which this backtest's engines don't do (same simplification
+    ut_bot_engine's position sizing already makes when it treats risk
+    distance in "price units" as USD regardless of quote convention)."""
+    return max(notional * bps / 10000, minimum)
+
+
+FX_PIP_SIZE = 0.0001
+FX_PIP_SIZE_JPY = 0.01
+
+# UNLIKE FX_COMMISSION_BPS above, this is NOT a published, verified
+# schedule -- IBKR IDEALPRO passes through live interbank quotes, so the
+# spread actually paid on any given fill varies continuously with
+# liquidity, time of day, and volatility; there is no fixed rate card for
+# it the way there is for commission. These are commonly-cited ballpark
+# figures for institutional/ECN-tier pricing (the tier IDEALPRO
+# approximates), cross-referenced across several public spread-comparison
+# sources (2026-07) -- a reasonable planning assumption for "is this
+# strategy's edge bigger than a plausible spread cost", NOT a guarantee
+# of what any specific fill will actually cost. Treat real execution data
+# as authoritative over this table whenever it's available.
+FX_TYPICAL_SPREAD_PIPS = {
+    "EURUSD": 0.2,
+    "GBPUSD": 0.4,
+    "USDJPY": 0.25,
+    "AUDUSD": 0.5,
+    "USDCAD": 0.6,
+    "USDCHF": 0.6,
+    "NZDUSD": 0.8,
+}
+
+
+def fx_pip_size(symbol: str) -> float:
+    """0.01 for JPY-quoted pairs (e.g. USDJPY), 0.0001 for every other
+    major -- the standard FX convention for what one "pip" is worth in
+    price terms."""
+    return FX_PIP_SIZE_JPY if symbol.upper().endswith("JPY") else FX_PIP_SIZE
+
+
+def fx_half_spread_price(symbol: str, spread_pips: float) -> float:
+    """Half of `spread_pips` converted to price units for `symbol` -- the
+    per-side cost an aggressive fill pays crossing the spread (see
+    fx_fill_price). `spread_pips` is always caller-supplied (e.g. from
+    FX_TYPICAL_SPREAD_PIPS, or real observed spread data) rather than
+    defaulted here, since -- unlike commission -- there's no single
+    "correct" number to fall back to silently."""
+    return spread_pips * fx_pip_size(symbol) / 2
+
+
+def fx_fill_price(mid_price: float, side: str, half_spread: float) -> float:
+    """The realistic fill price for an aggressive/market order crossing
+    the spread: a BUY fills at the ask (half_spread ABOVE mid), a SELL
+    fills at the bid (half_spread BELOW mid). `side` is the order's own
+    direction (BUY/SELL), not "entry vs exit" or "long vs short" -- a
+    short's opening SELL crosses down to the bid exactly like a long's
+    closing SELL does."""
+    return mid_price + half_spread if side == "BUY" else mid_price - half_spread
+
+
 def position_size(
     portfolio_value: float,
     risk_pct: float,
