@@ -384,7 +384,14 @@ def manage_position(ib, pos: dict, rules: dict) -> dict | None:
                 log_event({"event": "new_high_sell_failed", "symbol": symbol, "status": status})
                 pos["stop_order_id"] = _place_stop(ib, symbol, pos["qty"], pos["current_stop_price"])
                 return pos
-            fill_price = trade.orderStatus.avgFillPrice or 0.0
+            # avgFillPrice is only populated once the fill actually
+            # settles -- _market_order's wait loop can return as soon as
+            # the order merely reaches "Submitted", before that happens.
+            # Falling back to 0.0 (as this used to) silently corrupts
+            # every downstream P&L calc from smc_trades.csv; the last
+            # bar's close is a much closer stand-in for what a market
+            # order actually filled near.
+            fill_price = trade.orderStatus.avgFillPrice or float(today_bars["Close"].iloc[-1])
             append_trade_row(symbol, "SELL", pos["qty"], fill_price, trade.order.orderId, status, "new_high_exit")
             pnl = (fill_price - pos["entry_price"]) * pos["qty"] if fill_price else None
             log_event({"event": "new_high_exit", "symbol": symbol, "fill_price": fill_price, "pnl": pnl})
@@ -415,7 +422,12 @@ def force_close_all(ib, positions: list[dict]) -> list[dict]:
             )
             still_open.append(pos)
         else:
-            fill_price = trade.orderStatus.avgFillPrice or 0.0
+            # See manage_position's new_high_exit branch: avgFillPrice can
+            # still be unset at this point, and falling back to 0.0 (as
+            # this used to) silently corrupts every downstream P&L calc
+            # from smc_trades.csv. No bars are already in hand here, so
+            # fetch the current price as the closest stand-in instead.
+            fill_price = trade.orderStatus.avgFillPrice or get_current_price(ib, pos["symbol"]) or 0.0
             append_trade_row(
                 pos["symbol"], "SELL", pos["qty"], fill_price, trade.order.orderId, status, "same_day_force_close"
             )
