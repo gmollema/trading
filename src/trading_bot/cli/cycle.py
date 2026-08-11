@@ -43,6 +43,7 @@ POSITIONS_PATH = Path("open_positions.json")
 RULES_PATH = Path("rules.json")
 TRADES_CSV_PATH = Path("trades.csv")
 SAFETY_LOG_PATH = Path("safety-check-log.json")
+HEARTBEAT_PATH = Path("heartbeat.json")
 LOGS_DIR = Path("logs")
 CYCLE_ERRORS_LOG = LOGS_DIR / "cycle_errors.log"
 
@@ -104,6 +105,7 @@ from dotenv import load_dotenv  # noqa: E402
 from ib_async import MarketOrder, Stock, StopOrder  # noqa: E402
 
 from trading_bot.broker.ibkr_client import IBKRClient  # noqa: E402
+from trading_bot.util.heartbeat import write_heartbeat  # noqa: E402
 from trading_bot.util.notifier import notify  # noqa: E402
 
 
@@ -899,15 +901,18 @@ def main() -> int:
             positions = force_close_all(ibkr.ib, positions)
             save_positions(positions)
             log_event({"event": "force_close_complete", "positions_remaining": len(positions)})
+            write_heartbeat(HEARTBEAT_PATH, status)
             return 0
 
         if status == "manage_only":
+            write_heartbeat(HEARTBEAT_PATH, status)
             return 0
 
         if status == "ok":
             new_positions = entry_scan(ibkr.ib, rules, env)
             positions.extend(new_positions)
             save_positions(positions)
+            write_heartbeat(HEARTBEAT_PATH, status)
             return 0
 
         return 0

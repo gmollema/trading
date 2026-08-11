@@ -19,6 +19,10 @@ smc_watchlist.txt
 # UT Bot runtime state (mirrors the gap-and-go / SMC bots' ignored state files)
 ut_bot_open_positions.json
 
+# Heartbeat files written by cycle.py/smc_cycle.py for heartbeat_monitor.py
+heartbeat.json
+smc_heartbeat.json
+
 # IDE / test cache / local Claude Code settings -- machine-specific, not shared
 .idea/
 .pytest_cache/

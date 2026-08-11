@@ -47,6 +47,7 @@ ET = ZoneInfo("America/New_York")
 
 LOGS_DIR = Path("logs")
 SMC_CYCLE_ERRORS_LOG = LOGS_DIR / "smc_cycle_errors.log"
+SMC_HEARTBEAT_PATH = Path("smc_heartbeat.json")
 
 SETTLED_ORDER_STATUSES = {"Filled", "Cancelled", "ApiCancelled", "Inactive", "Rejected"}
 FAILED_SELL_STATUSES = {"Cancelled", "ApiCancelled", "Inactive", "Rejected"}
@@ -89,6 +90,7 @@ from ib_async import MarketOrder, Stock, StopOrder  # noqa: E402
 from trading_bot import smc_live  # noqa: E402
 from trading_bot.backtest.smc_signals import confirmed_new_high_exit, latest_entry_signal  # noqa: E402
 from trading_bot.broker.ibkr_client import IBKRClient  # noqa: E402
+from trading_bot.util.heartbeat import write_heartbeat  # noqa: E402
 from trading_bot.util.notifier import notify  # noqa: E402
 
 
@@ -599,6 +601,7 @@ def main() -> int:
             positions = force_close_all(ibkr.ib, positions)
             save_positions(positions)
             log_event({"event": "force_close_complete", "positions_remaining": len(positions)})
+            write_heartbeat(SMC_HEARTBEAT_PATH, status)
             return 0
 
         if status == "ok":
@@ -606,6 +609,7 @@ def main() -> int:
             positions.extend(new_positions)
             save_positions(positions)
 
+        write_heartbeat(SMC_HEARTBEAT_PATH, status)
         return 0
     finally:
         try:

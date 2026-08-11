@@ -1,6 +1,6 @@
 """Register Windows Task Scheduler entries for the IBKR paper-trading bot.
 
-Creates 11 tasks (all HT_ prefixed), all running in the current user's
+Creates 14 tasks (all HT_ prefixed), all running in the current user's
 context (no admin elevation, no SYSTEM account). Safe to re-run - each
 schtasks /create call uses /F to overwrite an existing task of the same
 name.
@@ -87,6 +87,16 @@ def build_cycle_task(task_name: str, tr: str, hh: int, mm: int) -> None:
     run_schtasks_create(task_name, tr, schedule_args)
 
 
+def build_interval_task(task_name: str, tr: str, hh: int, mm: int, interval_minutes: int) -> None:
+    local_hhmm = et_time_to_local_hhmm(hh, mm)
+    schedule_args = [
+        "/sc", "MINUTE",
+        "/MO", str(interval_minutes),
+        "/ST", local_hhmm,
+    ]
+    run_schtasks_create(task_name, tr, schedule_args)
+
+
 def quoted_tr(module: str) -> str:
     """Build a schtasks /tr value that (a) cd's into the project dir so all
     relative data paths (trades.csv, logs/, rules.json) resolve correctly,
@@ -106,6 +116,7 @@ def main() -> None:
     dashboard_tr = quoted_tr("trading_bot.cli.compute_perf")
     smc_prefilter_tr = quoted_tr("trading_bot.cli.smc_prefilter")
     smc_cycle_tr = quoted_tr("trading_bot.cli.smc_cycle")
+    heartbeat_monitor_tr = quoted_tr("trading_bot.cli.heartbeat_monitor")
     keepawake_tr = "powercfg /change standby-timeout-ac 0"
 
     # HT_LogRotate - 09:25 ET, Mon-Fri
@@ -138,6 +149,16 @@ def main() -> None:
     # smc_cycle.py's own fast gate exits in under a second off-hours.
     build_cycle_task("HT_SMC_Cycle", smc_cycle_tr, 10, 2)
 
+    # HT_HeartbeatMonitor - every 30 min starting 10:20 ET, daily (its own
+    # check window, 10:20-16:00 ET Mon-Fri, is enforced inside
+    # heartbeat_monitor.py, same "scheduling is coarse, the script's own
+    # gate is precise" convention as HT_Cycle/HT_SMC_Cycle). Dead-man's
+    # switch for both bots: pages if either hasn't completed a cycle
+    # recently, independent of IBKR -- see heartbeat_monitor.py's docstring
+    # for why this was added (both bots went silent for 8 days, unnoticed,
+    # when TWS itself went down).
+    build_interval_task("HT_HeartbeatMonitor", heartbeat_monitor_tr, 10, 20, 30)
+
     print()
     # schtasks /query /tn does NOT support wildcards (e.g. "HT_*") - it
     # expects an exact task name, so query everything and filter here.
@@ -157,7 +178,8 @@ def main() -> None:
         print("\n".join(ht_lines))
 
     print(
-        "SCHEDULED: 13 tasks created (incl. HT_SMC_Prefilter/HT_SMC_Cycle for the SMC bot). "
+        "SCHEDULED: 14 tasks created (incl. HT_SMC_Prefilter/HT_SMC_Cycle for the SMC bot, "
+        "HT_HeartbeatMonitor as a dead-man's switch for both). "
         "The bots will fire on their own starting next market open. Watch Telegram."
     )
 
