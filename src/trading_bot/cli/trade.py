@@ -44,6 +44,20 @@ def print_trade_log_tail(n: int = 20) -> None:
         print("(no trade.log found)")
 
 
+def get_current_price(ibkr: IBKRClient, contract) -> float | None:
+    """Best-effort current price for `contract`, for use as a fill-price
+    stand-in when an order's avgFillPrice isn't populated yet (see
+    append_trade_row's caller below). Mirrors smc_cycle.get_current_price."""
+    ticker = ibkr.ib.reqMktData(contract, "", False, False)
+    ibkr.ib.sleep(2)
+    price = ticker.marketPrice()
+    if price is None or price != price or price <= 0:  # NaN / missing
+        last = ticker.last
+        price = last if last and last == last and last > 0 else None
+    ibkr.ib.cancelMktData(contract)
+    return float(price) if price else None
+
+
 def ensure_trades_csv() -> None:
     if not TRADES_CSV.exists():
         with TRADES_CSV.open("w", newline="") as f:
@@ -88,7 +102,13 @@ def main() -> None:
         trade = ibkr.place_order(args.symbol, args.side, args.size)
 
         status = trade.orderStatus.status
-        fill_price = trade.orderStatus.avgFillPrice or 0
+        # avgFillPrice is only populated once the fill actually settles --
+        # IBKRClient.place_order's wait loop can return as soon as the
+        # order merely reaches "Submitted", before that happens. Falling
+        # back to 0 (as this used to) silently corrupts every downstream
+        # P&L calc from trades.csv (confirmed in practice: two live rows,
+        # CRWD and CTAS, both status "Submitted" fill_price 0).
+        fill_price = trade.orderStatus.avgFillPrice or get_current_price(ibkr, trade.contract) or 0
         order_id = trade.order.orderId
 
         if status in FAILED_STATUSES:
