@@ -33,13 +33,26 @@ def et_time_to_local_hhmm(hh: int, mm: int) -> str:
     return local_dt.strftime("%H:%M")
 
 
-def hide_task_window(task_name: str) -> None:
-    """schtasks.exe has no /hidden flag, so toggle it via the Settings
-    object afterward -- otherwise every run under the interactive logon
-    flashes a visible cmd.exe console on screen."""
+def apply_post_create_settings(task_name: str) -> None:
+    """schtasks.exe /create has no CLI flags for these -- toggle them via
+    the Settings object afterward:
+      - Hidden = true: otherwise every run under the interactive logon
+        flashes a visible cmd.exe console on screen.
+      - DisallowStartIfOnBatteries / StopIfGoingOnBatteries = false:
+        schtasks /create defaults BOTH to true (its laptop-friendly
+        default for background maintenance tasks), which silently skips
+        every future trigger the moment this laptop is unplugged -- no
+        error anywhere, since the task's process never even starts.
+        Confirmed in practice: both trading bots stopped firing for over
+        an hour with zero log entries once the laptop switched to
+        battery power. An unattended trading bot needs to keep running
+        regardless of power source.
+    """
     ps_cmd = (
         f"$t = Get-ScheduledTask -TaskName '{task_name}'; "
         f"$t.Settings.Hidden = $true; "
+        f"$t.Settings.DisallowStartIfOnBatteries = $false; "
+        f"$t.Settings.StopIfGoingOnBatteries = $false; "
         f"Set-ScheduledTask -TaskName '{task_name}' -Settings $t.Settings | Out-Null"
     )
     result = subprocess.run(
@@ -47,7 +60,7 @@ def hide_task_window(task_name: str) -> None:
         check=False, capture_output=True, text=True,
     )
     if result.returncode != 0:
-        print(f"WARNING: failed to hide window for {task_name}: {result.stderr.strip()}", file=sys.stderr)
+        print(f"WARNING: failed to apply settings for {task_name}: {result.stderr.strip()}", file=sys.stderr)
 
 
 def run_schtasks_create(task_name: str, tr: str, schedule_args: list[str]) -> None:
@@ -64,7 +77,7 @@ def run_schtasks_create(task_name: str, tr: str, schedule_args: list[str]) -> No
         print(f"FAILED to create {task_name}: {result.stderr.strip()}", file=sys.stderr)
     else:
         print(f"Created {task_name}")
-        hide_task_window(task_name)
+        apply_post_create_settings(task_name)
 
 
 def build_weekly_task(task_name: str, tr: str, hh: int, mm: int) -> None:

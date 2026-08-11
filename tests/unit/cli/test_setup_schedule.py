@@ -29,26 +29,28 @@ class TestEtTimeToLocalHhmm(unittest.TestCase):
         self.assertEqual(result, expected_local)
 
 
-class TestHideTaskWindow(unittest.TestCase):
+class TestApplyPostCreateSettings(unittest.TestCase):
     def test_success_is_silent(self):
         with patch("trading_bot.cli.setup_schedule.subprocess.run",
                     return_value=MagicMock(returncode=0, stderr="")) as mock_run:
             buf = io.StringIO()
             with redirect_stdout(buf):
-                setup_schedule.hide_task_window("HT_Test")
+                setup_schedule.apply_post_create_settings("HT_Test")
 
         self.assertEqual(buf.getvalue(), "")
         cmd = mock_run.call_args[0][0]
         self.assertEqual(cmd[0], "powershell.exe")
         self.assertIn("HT_Test", cmd[-1])
         self.assertIn("Hidden = $true", cmd[-1])
+        self.assertIn("DisallowStartIfOnBatteries = $false", cmd[-1])
+        self.assertIn("StopIfGoingOnBatteries = $false", cmd[-1])
 
     def test_failure_prints_warning(self):
         with patch("trading_bot.cli.setup_schedule.subprocess.run",
                     return_value=MagicMock(returncode=1, stderr="access denied")):
             buf = io.StringIO()
             with redirect_stdout(buf):
-                setup_schedule.hide_task_window("HT_Test")
+                setup_schedule.apply_post_create_settings("HT_Test")
 
         # printed to stderr, not stdout -- just confirm no crash here;
         # stderr behavior is covered indirectly via run_schtasks_create below.
@@ -69,7 +71,7 @@ class TestRunSchtasksCreate(unittest.TestCase):
         self.assertIn("HT_Test", create_cmd)
         self.assertIn("/F", create_cmd)
 
-        # hide_task_window must run right after a successful creation
+        # apply_post_create_settings must run right after a successful creation
         self.assertEqual(mock_run.call_count, 2)
         hide_cmd = mock_run.call_args_list[1][0][0]
         self.assertEqual(hide_cmd[0], "powershell.exe")
