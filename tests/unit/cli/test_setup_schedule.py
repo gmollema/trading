@@ -44,6 +44,8 @@ class TestApplyPostCreateSettings(unittest.TestCase):
         self.assertIn("Hidden = $true", cmd[-1])
         self.assertIn("DisallowStartIfOnBatteries = $false", cmd[-1])
         self.assertIn("StopIfGoingOnBatteries = $false", cmd[-1])
+        self.assertIn("WorkingDirectory = ", cmd[-1])
+        self.assertIn(str(setup_schedule.PROJECT_DIR), cmd[-1])
 
     def test_failure_prints_warning(self):
         with patch("trading_bot.cli.setup_schedule.subprocess.run",
@@ -113,11 +115,11 @@ class TestBuildTaskHelpers(unittest.TestCase):
 
 
 class TestQuotedTr(unittest.TestCase):
-    def test_includes_cd_and_module_invocation(self):
+    def test_invokes_venv_python_directly_without_cmd_wrapper(self):
         result = setup_schedule.quoted_tr("trading_bot.cli.cycle")
 
-        self.assertIn("cd /d", result)
-        self.assertIn(str(setup_schedule.PROJECT_DIR), result)
+        self.assertNotIn("cmd /c", result)
+        self.assertNotIn("cd /d", result)
         self.assertIn(str(setup_schedule.VENV_PY), result)
         self.assertIn("-m trading_bot.cli.cycle", result)
 

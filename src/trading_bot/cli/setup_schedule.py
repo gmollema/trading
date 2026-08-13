@@ -35,9 +35,12 @@ def et_time_to_local_hhmm(hh: int, mm: int) -> str:
 
 def apply_post_create_settings(task_name: str) -> None:
     """schtasks.exe /create has no CLI flags for these -- toggle them via
-    the Settings object afterward:
-      - Hidden = true: otherwise every run under the interactive logon
-        flashes a visible cmd.exe console on screen.
+    the Settings/Actions objects afterward:
+      - Hidden = true: suppresses the console for the task's own process,
+        but does NOT reliably suppress the brief console flash from a
+        cmd.exe wrapper launching underneath it (a known Task Scheduler
+        quirk) -- see quoted_tr's WorkingDirectory comment for the other
+        half of that fix.
       - DisallowStartIfOnBatteries / StopIfGoingOnBatteries = false:
         schtasks /create defaults BOTH to true (its laptop-friendly
         default for background maintenance tasks), which silently skips
@@ -47,13 +50,20 @@ def apply_post_create_settings(task_name: str) -> None:
         an hour with zero log entries once the laptop switched to
         battery power. An unattended trading bot needs to keep running
         regardless of power source.
+      - Actions[0].WorkingDirectory = PROJECT_DIR: schtasks /tr has no
+        flag for this, which is why quoted_tr used to route through
+        `cmd /c cd /d ... &&` instead -- but that cmd.exe hop is itself
+        the main source of the visible console flash on every run, even
+        with Hidden=true set above. Setting it here instead lets
+        quoted_tr call the venv's python.exe directly.
     """
     ps_cmd = (
         f"$t = Get-ScheduledTask -TaskName '{task_name}'; "
         f"$t.Settings.Hidden = $true; "
         f"$t.Settings.DisallowStartIfOnBatteries = $false; "
         f"$t.Settings.StopIfGoingOnBatteries = $false; "
-        f"Set-ScheduledTask -TaskName '{task_name}' -Settings $t.Settings | Out-Null"
+        f"$t.Actions[0].WorkingDirectory = '{PROJECT_DIR}'; "
+        f"Set-ScheduledTask -TaskName '{task_name}' -Settings $t.Settings -Action $t.Actions | Out-Null"
     )
     result = subprocess.run(
         ["powershell.exe", "-NoProfile", "-Command", ps_cmd],
@@ -111,11 +121,17 @@ def build_interval_task(task_name: str, tr: str, hh: int, mm: int, interval_minu
 
 
 def quoted_tr(module: str) -> str:
-    """Build a schtasks /tr value that (a) cd's into the project dir so all
-    relative data paths (trades.csv, logs/, rules.json) resolve correctly,
-    and (b) runs the given module with the venv's python via -m (requires
-    the package to be installed in the venv: pip install -e .)."""
-    return f'cmd /c cd /d "{PROJECT_DIR}" && "{VENV_PY}" -m {module}'
+    """Build a schtasks /tr value that runs the given module with the
+    venv's python via -m (requires the package to be installed in the
+    venv: pip install -e .). Calls python.exe directly rather than
+    routing through `cmd /c cd /d ... &&` -- that cmd.exe hop used to be
+    how relative data paths (trades.csv, logs/, rules.json) resolved
+    correctly, but launching a console app to launch another console app
+    is exactly what causes Task Scheduler to flash a visible window even
+    when Settings.Hidden is true. apply_post_create_settings sets the
+    task Action's WorkingDirectory to PROJECT_DIR instead, which gets the
+    same correct-relative-paths behavior without the extra hop."""
+    return f'"{VENV_PY}" -m {module}'
 
 
 def main() -> None:
