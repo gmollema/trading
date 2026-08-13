@@ -17,7 +17,7 @@ from datetime import datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-VENV_PY = Path(".venv/Scripts/python.exe").resolve()
+VENV_PY = Path(".venv/Scripts/pythonw.exe").resolve()
 PROJECT_DIR = Path(".").resolve()
 
 ET = ZoneInfo("America/New_York")
@@ -36,11 +36,12 @@ def et_time_to_local_hhmm(hh: int, mm: int) -> str:
 def apply_post_create_settings(task_name: str) -> None:
     """schtasks.exe /create has no CLI flags for these -- toggle them via
     the Settings/Actions objects afterward:
-      - Hidden = true: suppresses the console for the task's own process,
-        but does NOT reliably suppress the brief console flash from a
-        cmd.exe wrapper launching underneath it (a known Task Scheduler
-        quirk) -- see quoted_tr's WorkingDirectory comment for the other
-        half of that fix.
+      - Hidden = true: belt-and-suspenders for console-subsystem actions
+        (e.g. HT_KeepAwake's raw `powercfg` command below) -- doesn't
+        actually matter for the python.exe-launching tasks anymore now
+        that quoted_tr calls pythonw.exe (see its docstring), which has
+        no console to hide in the first place, but costs nothing to leave
+        set.
       - DisallowStartIfOnBatteries / StopIfGoingOnBatteries = false:
         schtasks /create defaults BOTH to true (its laptop-friendly
         default for background maintenance tasks), which silently skips
@@ -52,10 +53,10 @@ def apply_post_create_settings(task_name: str) -> None:
         regardless of power source.
       - Actions[0].WorkingDirectory = PROJECT_DIR: schtasks /tr has no
         flag for this, which is why quoted_tr used to route through
-        `cmd /c cd /d ... &&` instead -- but that cmd.exe hop is itself
-        the main source of the visible console flash on every run, even
-        with Hidden=true set above. Setting it here instead lets
-        quoted_tr call the venv's python.exe directly.
+        `cmd /c cd /d ... &&` instead -- needed so relative data paths
+        (trades.csv, logs/, rules.json) resolve correctly. Setting it
+        here instead lets quoted_tr call the venv's interpreter directly,
+        with no cmd.exe hop.
     """
     ps_cmd = (
         f"$t = Get-ScheduledTask -TaskName '{task_name}'; "
@@ -123,14 +124,20 @@ def build_interval_task(task_name: str, tr: str, hh: int, mm: int, interval_minu
 def quoted_tr(module: str) -> str:
     """Build a schtasks /tr value that runs the given module with the
     venv's python via -m (requires the package to be installed in the
-    venv: pip install -e .). Calls python.exe directly rather than
-    routing through `cmd /c cd /d ... &&` -- that cmd.exe hop used to be
-    how relative data paths (trades.csv, logs/, rules.json) resolved
-    correctly, but launching a console app to launch another console app
-    is exactly what causes Task Scheduler to flash a visible window even
-    when Settings.Hidden is true. apply_post_create_settings sets the
-    task Action's WorkingDirectory to PROJECT_DIR instead, which gets the
-    same correct-relative-paths behavior without the extra hop."""
+    venv: pip install -e .). Uses pythonw.exe, NOT python.exe -- pythonw
+    is linked against the Windows subsystem instead of the console
+    subsystem, so it never allocates a console window at all, regardless
+    of Task Scheduler's Hidden setting (which only suppresses/minimizes a
+    window a console-subsystem process already created -- it's not
+    reliable for suppressing the brief flash from cmd.exe hops or from
+    launching python.exe itself, confirmed in practice: switching
+    python.exe -> pythonw.exe was what actually stopped the console
+    flashes; Hidden=true plus a direct python.exe call was not enough).
+    Also skips the `cmd /c cd /d ... &&` wrapper this used to route
+    through for relative-path resolution (trades.csv, logs/, rules.json)
+    -- apply_post_create_settings sets the task Action's WorkingDirectory
+    to PROJECT_DIR instead, which gets the same behavior without the
+    extra hop."""
     return f'"{VENV_PY}" -m {module}'
 
 
