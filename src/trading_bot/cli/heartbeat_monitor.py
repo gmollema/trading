@@ -1,16 +1,20 @@
-"""Dead-man's-switch monitor for the gap-and-go and SMC paper-trading bots.
+"""Dead-man's-switch monitor for the SMC paper-trading bot.
 
-Deliberately independent of IBKR/TWS -- it only reads local heartbeat
-files (written by cycle.py/smc_cycle.py on every cycle that successfully
-connects and completes, see util/heartbeat.py) and pushes a notification
-via notify() over HTTP. It must keep working precisely when the thing
-it's checking for (TWS being reachable) is broken.
+Deliberately independent of IBKR/TWS -- it only reads the local heartbeat
+file (written by smc_cycle.py on every cycle that successfully connects
+and completes, see util/heartbeat.py) and pushes a notification via
+notify() over HTTP. It must keep working precisely when the thing it's
+checking for (TWS being reachable) is broken.
 
 Motivated by both bots going silent for 8 days (TWS itself was down,
 WinError 1225) with nobody noticing until a manual log check -- neither
 bot's own logging escalates "I haven't run successfully in hours," it
 just logs each connection failure and waits for the next scheduled
 cycle. This is the escalation that was missing.
+
+Gap-and-go (cycle.py) is decommissioned and its scheduled task disabled,
+so its heartbeat is intentionally never refreshed -- checking it here
+would page forever about a bot that isn't supposed to be running.
 
 Usage:
     python -m trading_bot.cli.heartbeat_monitor
@@ -25,7 +29,6 @@ from zoneinfo import ZoneInfo
 
 ET = ZoneInfo("America/New_York")
 
-HEARTBEAT_PATH = Path("heartbeat.json")
 SMC_HEARTBEAT_PATH = Path("smc_heartbeat.json")
 
 # Cycles run every 5 min; this allows a few missed cycles (e.g. one
@@ -71,10 +74,7 @@ def main() -> int:
 
     alerts = [
         msg
-        for msg in (
-            check_one("Gap-and-go", HEARTBEAT_PATH),
-            check_one("SMC", SMC_HEARTBEAT_PATH),
-        )
+        for msg in (check_one("SMC", SMC_HEARTBEAT_PATH),)
         if msg is not None
     ]
 
@@ -83,7 +83,7 @@ def main() -> int:
         print(body)
         notify("Bot heartbeat ALERT", body, "high")
     else:
-        print("Both bots healthy.")
+        print("SMC healthy.")
 
     return 0
 
