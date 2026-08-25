@@ -243,19 +243,39 @@ def get_current_price(ib, symbol: str) -> float | None:
 # Bars
 # --------------------------------------------------------------------------
 
-def get_5m_bars(symbol_ibkr: str):
+def get_5m_bars(symbol_ibkr: str, context: str = "unknown"):
     """~7 days of RTH-only 5-min bars (matches the backtest's RTH-only
-    cached data), tz-converted to ET. Returns None on any data problem."""
+    cached data), tz-converted to ET. Returns None on any data problem,
+    logging which one -- callers only ever see None, so the three causes
+    below used to be indistinguishable after the fact, and the entry
+    scan reported all of them as "no fresh 5m bars", which pointed at a
+    staleness check that was almost certainly never involved:
+    BAR_STALENESS_LIMIT_MINUTES is 20 while the cycle runs every 5, so
+    intraday _bars_are_fresh has ~13 minutes of slack and every logged
+    occurrence was in fact one of these fetch failures. `context` names
+    the call site, since both the entry scan and the new-high exit check
+    fetch bars and a bare symbol wouldn't say which one went blind."""
     symbol_yahoo = symbol_ibkr.replace(" ", "-")
     try:
         bars = yf.Ticker(symbol_yahoo).history(period="7d", interval="5m", prepost=False, auto_adjust=True)
-    except Exception:
+    except Exception as e:
+        log_event({
+            "event": "bars_unavailable",
+            "symbol": symbol_ibkr,
+            "context": context,
+            "cause": "yfinance_error",
+            "error": f"{type(e).__name__}: {e}",
+        })
         return None
     if bars is None or bars.empty:
+        log_event({"event": "bars_unavailable", "symbol": symbol_ibkr, "context": context, "cause": "empty_response"})
         return None
     bars.index = bars.index.tz_convert(ET)
     rth = bars[bars.index.map(lambda ts: (9, 30) <= (ts.hour, ts.minute) < (16, 0))]
-    return rth if not rth.empty else None
+    if rth.empty:
+        log_event({"event": "bars_unavailable", "symbol": symbol_ibkr, "context": context, "cause": "no_rth_rows"})
+        return None
+    return rth
 
 
 def _bars_are_fresh(bars) -> bool:
@@ -364,7 +384,7 @@ def manage_position(ib, pos: dict, rules: dict) -> dict | None:
     # Mirrors the backtest gate: only armed once TP1 is done or was never
     # available (no resistance OB above at entry).
     if pos.get("tp1_done") or pos.get("tp1_price") is None:
-        bars = get_5m_bars(symbol)
+        bars = get_5m_bars(symbol, context="new_high_check")
         if bars is None:
             return pos
         today = datetime.now(ET).date()
@@ -471,9 +491,18 @@ def entry_scan(ib, rules: dict, env: dict, open_positions: list[dict]) -> list[d
         if ticker in held_symbols:
             continue
 
-        bars = get_5m_bars(ticker)
-        if bars is None or not _bars_are_fresh(bars):
-            log_event({"event": "entry_skipped", "symbol": ticker, "reason": "no fresh 5m bars"})
+        bars = get_5m_bars(ticker, context="entry_scan")
+        if bars is None:
+            continue
+        if not _bars_are_fresh(bars):
+            last_ts = bars.index[-1]
+            log_event({
+                "event": "entry_skipped",
+                "symbol": ticker,
+                "reason": "stale 5m bars",
+                "last_bar_et": last_ts.isoformat(),
+                "age_minutes": round((datetime.now(ET) - last_ts).total_seconds() / 60, 1),
+            })
             continue
 
         signal = latest_entry_signal(

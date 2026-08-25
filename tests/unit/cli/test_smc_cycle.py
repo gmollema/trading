@@ -5,11 +5,12 @@ already-reviewed patterns and get exercised by paper trading itself;
 these tests cover the pure logic: trade-log round trips, daily BUY
 counting, entry-bar index mapping, and bar freshness."""
 
+import json
 import unittest
 from datetime import datetime, timedelta
 from pathlib import Path
 from tempfile import TemporaryDirectory
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 from zoneinfo import ZoneInfo
 
 import pandas as pd
@@ -82,6 +83,61 @@ class TestBarsAreFresh(unittest.TestCase):
         idx = pd.date_range(now - timedelta(days=1, minutes=10), periods=3, freq="5min")
         bars = pd.DataFrame({"High": [1.0] * 3}, index=idx)
         self.assertFalse(smc_cycle._bars_are_fresh(bars))
+
+
+class TestGet5mBarsLogging(unittest.TestCase):
+    """get_5m_bars returns None down three separate paths and callers see
+    only that None, so each path has to say why it bailed."""
+
+    def _fetch(self, side_effect=None, frame=None):
+        """Run get_5m_bars against a stubbed yfinance, returning
+        (result, logged_events)."""
+        with TemporaryDirectory() as tmp:
+            log_path = Path(tmp) / "smc-safety-check-log.json"
+            ticker = MagicMock()
+            if side_effect is not None:
+                ticker.history.side_effect = side_effect
+            else:
+                ticker.history.return_value = frame
+            with patch.object(smc_live, "SMC_SAFETY_LOG_PATH", log_path), \
+                    patch.object(smc_cycle, "yf") as fake_yf:
+                fake_yf.Ticker.return_value = ticker
+                result = smc_cycle.get_5m_bars("NVDA", context="entry_scan")
+            events = []
+            if log_path.exists():
+                events = [json.loads(line) for line in log_path.read_text().splitlines()]
+            return result, events
+
+    def test_yfinance_error_logs_cause_and_message(self):
+        result, events = self._fetch(side_effect=RuntimeError("boom"))
+        self.assertIsNone(result)
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0]["event"], "bars_unavailable")
+        self.assertEqual(events[0]["cause"], "yfinance_error")
+        self.assertEqual(events[0]["symbol"], "NVDA")
+        self.assertEqual(events[0]["context"], "entry_scan")
+        # The bare `except Exception` used to discard this entirely.
+        self.assertIn("boom", events[0]["error"])
+
+    def test_empty_response_logs_its_own_cause(self):
+        result, events = self._fetch(frame=pd.DataFrame())
+        self.assertIsNone(result)
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0]["cause"], "empty_response")
+
+    def test_bars_entirely_outside_rth_log_their_own_cause(self):
+        idx = pd.date_range("2026-08-24 04:00", periods=3, freq="5min", tz=ET)
+        result, events = self._fetch(frame=pd.DataFrame({"High": [1.0] * 3}, index=idx))
+        self.assertIsNone(result)
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0]["cause"], "no_rth_rows")
+
+    def test_rth_bars_are_returned_and_log_nothing(self):
+        idx = pd.date_range("2026-08-24 09:55", periods=3, freq="5min", tz=ET)
+        result, events = self._fetch(frame=pd.DataFrame({"High": [1.0] * 3}, index=idx))
+        self.assertIsNotNone(result)
+        self.assertEqual(len(result), 3)
+        self.assertEqual(events, [])
 
 
 if __name__ == "__main__":
