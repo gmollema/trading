@@ -315,6 +315,55 @@ class TestLoadOpenPositions(unittest.TestCase):
         self.assertEqual(perf.load_open_positions(), [])
 
 
+class TestLoadEntryStopsBySymbol(unittest.TestCase):
+    def setUp(self):
+        self._tmpdir = tempfile.TemporaryDirectory()
+        self.log_path = Path(self._tmpdir.name) / "smc-safety-check-log.json"
+        self.patcher = patch.object(perf, "SAFETY_LOG_PATH", self.log_path)
+        self.patcher.start()
+
+    def tearDown(self):
+        self.patcher.stop()
+        self._tmpdir.cleanup()
+
+    def _write(self, events):
+        self.log_path.write_text("".join(json.dumps(e) + "\n" for e in events))
+
+    def test_missing_file_returns_empty(self):
+        self.assertEqual(perf.load_entry_stops_by_symbol(), {})
+
+    def test_collects_entry_opened_and_ignores_other_events(self):
+        self._write([
+            {"event": "entry_opened", "symbol": "KLAC", "entry_price": 182.05, "stop": 180.445},
+            {"event": "stopped_out", "symbol": "KLAC", "fill_price": 182.0},
+            {"event": "entry_opened", "symbol": "GS", "entry_price": 1036.78, "stop": 1035.93},
+            {"event": "force_close_complete", "positions_remaining": 0},
+        ])
+
+        result = perf.load_entry_stops_by_symbol()
+
+        self.assertEqual(sorted(result), ["GS", "KLAC"])
+        self.assertAlmostEqual(result["KLAC"][0]["stop"], 180.445)
+        self.assertAlmostEqual(result["GS"][0]["entry_price"], 1036.78)
+
+    def test_multiple_entries_per_symbol_are_all_kept(self):
+        self._write([
+            {"event": "entry_opened", "symbol": "AMZN", "entry_price": 200.0, "stop": 198.0},
+            {"event": "entry_opened", "symbol": "AMZN", "entry_price": 210.0, "stop": 208.0},
+        ])
+
+        self.assertEqual(len(perf.load_entry_stops_by_symbol()["AMZN"]), 2)
+
+    def test_corrupt_and_incomplete_lines_are_skipped(self):
+        self.log_path.write_text(
+            "{not valid json\n"
+            + json.dumps({"event": "entry_opened", "symbol": "AAPL"}) + "\n"  # no price/stop
+            + json.dumps({"event": "entry_opened", "symbol": "MU", "entry_price": 900.0, "stop": 890.0}) + "\n"
+        )
+
+        self.assertEqual(list(perf.load_entry_stops_by_symbol()), ["MU"])
+
+
 class TestGetInitialStopForPair(unittest.TestCase):
     def test_matches_open_position_by_entry_price(self):
         pair = {"symbol": "AAPL", "buy_price": 100.0}
@@ -322,16 +371,40 @@ class TestGetInitialStopForPair(unittest.TestCase):
 
         self.assertEqual(perf.get_initial_stop_for_pair(pair, by_symbol), 97.0)
 
-    def test_falls_back_to_99pct_of_buy_price(self):
+    def test_prefers_smc_stop_price_over_legacy_initial_stop(self):
+        # smc_cycle writes stop_price (entry-time) plus current_stop_price
+        # (moved to breakeven at TP1); risk sizing wants the entry-time one.
+        pair = {"symbol": "AAPL", "buy_price": 100.0}
+        by_symbol = {"AAPL": [{"entry_price": 100.0, "stop_price": 97.0, "current_stop_price": 100.0}]}
+
+        self.assertEqual(perf.get_initial_stop_for_pair(pair, by_symbol), 97.0)
+
+    def test_unknown_stop_returns_none_rather_than_a_proxy(self):
+        # Deliberately no buy_price*0.99 fallback: SMC's stops come off
+        # order-block structure, so a 1% proxy silently invents risk.
         pair = {"symbol": "AAPL", "buy_price": 100.0}
 
-        self.assertAlmostEqual(perf.get_initial_stop_for_pair(pair, {}), 99.0)
+        self.assertIsNone(perf.get_initial_stop_for_pair(pair, {}))
 
-    def test_no_matching_entry_price_falls_back(self):
+    def test_no_matching_entry_price_returns_none(self):
         pair = {"symbol": "AAPL", "buy_price": 100.0}
         by_symbol = {"AAPL": [{"entry_price": 50.0, "initial_stop": 48.0}]}  # different entry -- no match
 
-        self.assertAlmostEqual(perf.get_initial_stop_for_pair(pair, by_symbol), 99.0)
+        self.assertIsNone(perf.get_initial_stop_for_pair(pair, by_symbol))
+
+    def test_falls_back_to_entry_opened_event_when_position_is_closed(self):
+        # The normal path for a daily summary: the pair being scored is
+        # already gone from smc_open_positions.json.
+        pair = {"symbol": "KLAC", "buy_price": 182.05}
+        entry_stops = {"KLAC": [{"entry_price": 182.05, "stop": 180.445}]}
+
+        self.assertAlmostEqual(perf.get_initial_stop_for_pair(pair, {}, entry_stops), 180.445)
+
+    def test_entry_opened_event_for_a_different_fill_is_not_used(self):
+        pair = {"symbol": "KLAC", "buy_price": 182.05}
+        entry_stops = {"KLAC": [{"entry_price": 170.0, "stop": 168.0}]}
+
+        self.assertIsNone(perf.get_initial_stop_for_pair(pair, {}, entry_stops))
 
 
 class TestComputeRForPairs(unittest.TestCase):
