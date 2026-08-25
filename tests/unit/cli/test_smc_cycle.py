@@ -140,5 +140,100 @@ class TestGet5mBarsLogging(unittest.TestCase):
         self.assertEqual(events, [])
 
 
+def _ohlc_bars(highs, closes=None):
+    """Today's 5-min bars with the given highs, indexed from 09:30 ET."""
+    today = datetime.now(ET).date()
+    start = datetime(today.year, today.month, today.day, 9, 30, tzinfo=ET)
+    idx = pd.date_range(start, periods=len(highs), freq="5min")
+    return pd.DataFrame(
+        {"High": [float(h) for h in highs], "Close": [float(c) for c in (closes or highs)]},
+        index=idx,
+    )
+
+
+class TestTp1Touched(unittest.TestCase):
+    """TP1 arms off bar highs at/after the entry bar, not a polled quote."""
+
+    def test_post_entry_high_reaching_target_triggers(self):
+        bars = _ohlc_bars([180.0, 181.0, 183.5, 182.0])
+        self.assertTrue(smc_cycle._tp1_touched(bars, 1, 183.32))
+
+    def test_post_entry_highs_below_target_do_not_trigger(self):
+        bars = _ohlc_bars([180.0, 182.0, 182.96, 182.63])
+        self.assertFalse(smc_cycle._tp1_touched(bars, 1, 183.32))
+
+    def test_target_reached_only_before_entry_does_not_trigger(self):
+        # The KLAC 2026-08-25 case: the stock printed 185.99 pre-entry and
+        # never exceeded 182.96 afterwards, but a delayed quote still fired
+        # TP1. Pre-entry highs must not count.
+        bars = _ohlc_bars([185.99, 184.85, 182.86, 182.96, 182.63])
+        self.assertFalse(smc_cycle._tp1_touched(bars, 2, 183.32))
+
+    def test_entry_on_final_bar_still_evaluates_that_bar(self):
+        bars = _ohlc_bars([180.0, 181.0, 183.4])
+        self.assertTrue(smc_cycle._tp1_touched(bars, 2, 183.32))
+        self.assertFalse(smc_cycle._tp1_touched(bars, 2, 184.0))
+
+    def test_exact_touch_counts(self):
+        bars = _ohlc_bars([180.0, 183.32])
+        self.assertTrue(smc_cycle._tp1_touched(bars, 1, 183.32))
+
+
+class _FakeOrderStatus:
+    def __init__(self, statuses):
+        self._statuses = list(statuses)
+
+    @property
+    def status(self):
+        # Last value repeats once the script is exhausted.
+        return self._statuses.pop(0) if len(self._statuses) > 1 else self._statuses[0]
+
+
+class _FakeTrade:
+    def __init__(self, statuses):
+        self.orderStatus = _FakeOrderStatus(statuses)
+
+
+class _FakeIB:
+    def __init__(self, trade):
+        self._trade = trade
+        self.sleeps = 0
+
+    def placeOrder(self, contract, order):
+        return self._trade
+
+    def sleep(self, _secs):
+        self.sleeps += 1
+
+    def qualifyContracts(self, stock):
+        return [stock]
+
+
+class TestMarketOrderWaitsForFill(unittest.TestCase):
+    """_market_order must wait for a settled status, not for "Submitted"."""
+
+    def _run(self, statuses, timeout=1.0):
+        ib = _FakeIB(_FakeTrade(statuses))
+        with patch.object(smc_cycle, "ORDER_FILL_TIMEOUT_SECS", timeout):
+            trade = smc_cycle._market_order(ib, "NVDA", "BUY", 10)
+        return ib, trade
+
+    def test_returns_once_filled(self):
+        ib, _ = self._run(["PendingSubmit", "Submitted", "Filled"])
+        # Broke out on Filled rather than spinning to the timeout.
+        self.assertEqual(ib.sleeps, 3)
+
+    def test_does_not_break_early_on_submitted(self):
+        # The regression guard: "Submitted" arrives before any fill, so
+        # breaking on it left avgFillPrice empty and callers recording a
+        # theoretical price instead of the real one.
+        ib, _ = self._run(["Submitted"], timeout=0.6)
+        self.assertGreater(ib.sleeps, 1)
+
+    def test_returns_on_terminal_non_fill(self):
+        ib, _ = self._run(["Submitted", "Cancelled"])
+        self.assertEqual(ib.sleeps, 2)
+
+
 if __name__ == "__main__":
     unittest.main()

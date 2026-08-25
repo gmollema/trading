@@ -52,6 +52,7 @@ SMC_HEARTBEAT_PATH = Path("smc_heartbeat.json")
 SETTLED_ORDER_STATUSES = {"Filled", "Cancelled", "ApiCancelled", "Inactive", "Rejected"}
 FAILED_SELL_STATUSES = {"Cancelled", "ApiCancelled", "Inactive", "Rejected"}
 CANCEL_CONFIRM_TIMEOUT_SECS = 5
+ORDER_FILL_TIMEOUT_SECS = 10
 BAR_STALENESS_LIMIT_MINUTES = 20
 
 
@@ -215,14 +216,26 @@ def _place_stop(ib, symbol: str, qty: int, stop_price: float) -> int | None:
 
 
 def _market_order(ib, symbol: str, side: str, qty: int):
+    """Place a market order and wait for it to settle, up to
+    ORDER_FILL_TIMEOUT_SECS.
+
+    Deliberately does NOT break on "Submitted": that status lands as soon
+    as IBKR acknowledges the order, long before any fill, so breaking on
+    it left avgFillPrice empty and pushed every caller onto its fallback
+    price. 8 of the first 9 SMC entries recorded the signal's order-block
+    level instead of what was actually paid, which also mis-anchored the
+    TP1 breakeven stop -- it moves to pos["entry_price"], so "breakeven"
+    was really the signal price rather than the fill. Callers keep their
+    fallbacks for the case where a fill genuinely doesn't arrive inside
+    the timeout."""
     contract = _qualify(ib, symbol)
     order = MarketOrder(side, qty)
     order.outsideRth = True
     trade = ib.placeOrder(contract, order)
-    deadline = time.time() + 10
+    deadline = time.time() + ORDER_FILL_TIMEOUT_SECS
     while time.time() < deadline:
         ib.sleep(0.25)
-        if trade.orderStatus.status in SETTLED_ORDER_STATUSES or trade.orderStatus.status == "Submitted":
+        if trade.orderStatus.status in SETTLED_ORDER_STATUSES:
             break
     return trade
 
@@ -344,14 +357,48 @@ def _entry_bar_index(today_bars, entry_bar_iso: str) -> int | None:
     return None
 
 
+def _tp1_touched(today_bars, entry_idx: int, tp1_price: float) -> bool:
+    """True once any bar at or after the entry bar has traded through
+    tp1_price.
+
+    Reads bar highs, matching the backtest, instead of polling a quote:
+    IBKRClient requests delayed data (MARKET_DATA_TYPE = 3, ~15-20 min
+    lagged, since paper accounts have no live entitlement), so comparing
+    get_current_price against the target fired TP1 on prices that had
+    already gone. KLAC on 2026-08-25 triggered at 10:12 ET off a ~09:55
+    quote near $184 against a $183.32 target, while the stock never
+    traded above $182.96 after entry. A bar high is a fact, so the worst
+    case here is a late trigger rather than a false one."""
+    highs = today_bars["High"].astype(float).iloc[entry_idx:]
+    return not highs.empty and float(highs.max()) >= tp1_price
+
+
 def manage_position(ib, pos: dict, rules: dict) -> dict | None:
     """Returns the (possibly updated) position, or None once fully closed."""
     symbol = pos["symbol"]
 
+    # Today's post-entry bars drive BOTH the TP1 touch check and the
+    # new-high exit below, so fetch and index them once here. yfinance is
+    # the flakiest dependency in the cycle and this path used to expose
+    # two separate fetches per position per cycle.
+    today_bars = None
+    entry_idx = None
+    bars = get_5m_bars(symbol, context="manage_position")
+    if bars is not None:
+        today = datetime.now(ET).date()
+        candidates = bars[[ts.date() == today for ts in bars.index]]
+        if candidates.empty:
+            log_event({"event": "bar_checks_skipped", "symbol": symbol, "reason": "no bars for today"})
+        else:
+            idx = _entry_bar_index(candidates, pos.get("entry_bar_iso", ""))
+            if idx is None:
+                log_event({"event": "bar_checks_skipped", "symbol": symbol, "reason": "entry bar not found"})
+            else:
+                today_bars, entry_idx = candidates, idx
+
     # --- TP1: sell a fraction, move the stop to breakeven ---
     if not pos.get("tp1_done") and pos.get("tp1_price") is not None:
-        price = get_current_price(ib, symbol)
-        if price is not None and price >= pos["tp1_price"]:
+        if today_bars is not None and _tp1_touched(today_bars, entry_idx, pos["tp1_price"]):
             if not _cancel_stop(ib, pos.get("stop_order_id")):
                 log_event({"event": "tp1_skipped", "symbol": symbol, "reason": "old stop cancel unconfirmed"})
                 return pos
@@ -366,7 +413,7 @@ def manage_position(ib, pos: dict, rules: dict) -> dict | None:
                     log_event({"event": "tp1_sell_failed", "symbol": symbol, "status": status})
                     pos["stop_order_id"] = _place_stop(ib, symbol, pos["qty"], pos["current_stop_price"])
                     return pos
-                fill_price = trade.orderStatus.avgFillPrice or price
+                fill_price = trade.orderStatus.avgFillPrice or float(today_bars["Close"].iloc[-1])
                 append_trade_row(symbol, "SELL", partial_qty, fill_price, trade.order.orderId, status, "tp1")
                 pos["qty"] -= partial_qty
                 notify(f"SMC TP1 {symbol}", f"sold {partial_qty} @ ${fill_price:.2f}, stop -> BE", "default")
@@ -384,16 +431,7 @@ def manage_position(ib, pos: dict, rules: dict) -> dict | None:
     # Mirrors the backtest gate: only armed once TP1 is done or was never
     # available (no resistance OB above at entry).
     if pos.get("tp1_done") or pos.get("tp1_price") is None:
-        bars = get_5m_bars(symbol, context="new_high_check")
-        if bars is None:
-            return pos
-        today = datetime.now(ET).date()
-        today_bars = bars[[ts.date() == today for ts in bars.index]]
-        if today_bars.empty:
-            return pos
-        entry_idx = _entry_bar_index(today_bars, pos.get("entry_bar_iso", ""))
-        if entry_idx is None:
-            log_event({"event": "new_high_check_skipped", "symbol": symbol, "reason": "entry bar not found"})
+        if today_bars is None:
             return pos
         highs = today_bars["High"].astype(float).tolist()
         if confirmed_new_high_exit(highs, entry_idx, rules["swing_window"]):
