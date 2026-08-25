@@ -179,6 +179,24 @@ class TestTp1Touched(unittest.TestCase):
         self.assertTrue(smc_cycle._tp1_touched(bars, 1, 183.32))
 
 
+class TestLastBarClose(unittest.TestCase):
+    """The force-close / new-high fill-price fallback reads a real traded
+    price, not get_current_price's delayed quote."""
+
+    def test_returns_latest_close(self):
+        bars = _ohlc_bars([181.0, 182.0, 183.0], closes=[180.5, 181.5, 182.75])
+        with patch.object(smc_cycle, "get_5m_bars", return_value=bars):
+            self.assertAlmostEqual(smc_cycle._last_bar_close("KLAC"), 182.75)
+
+    def test_missing_bars_return_none_so_caller_can_fall_through(self):
+        with patch.object(smc_cycle, "get_5m_bars", return_value=None):
+            self.assertIsNone(smc_cycle._last_bar_close("KLAC"))
+
+    def test_empty_frame_returns_none(self):
+        with patch.object(smc_cycle, "get_5m_bars", return_value=pd.DataFrame({"Close": []})):
+            self.assertIsNone(smc_cycle._last_bar_close("KLAC"))
+
+
 class _FakeOrderStatus:
     def __init__(self, statuses):
         self._statuses = list(statuses)

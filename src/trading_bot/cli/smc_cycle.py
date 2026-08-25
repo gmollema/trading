@@ -241,6 +241,14 @@ def _market_order(ib, symbol: str, side: str, qty: int):
 
 
 def get_current_price(ib, symbol: str) -> float | None:
+    """CAUTION: this returns DELAYED data, not a live price. IBKRClient
+    requests MARKET_DATA_TYPE = 3 (~15-20 min lagged) because paper
+    accounts have no live entitlement, and marketPrice() may hand back a
+    bid/ask midpoint no trade ever occurred at. Comparing it against a
+    price level is how TP1 came to fire on targets the stock had already
+    left (see _tp1_touched). Nothing in this module drives a decision or
+    a recorded price from it any more -- prefer bar data, which is
+    factual even when late. Kept because trade.py mirrors it."""
     contract = _qualify(ib, symbol)
     ticker = ib.reqMktData(contract, "", False, False)
     ib.sleep(2)
@@ -289,6 +297,16 @@ def get_5m_bars(symbol_ibkr: str, context: str = "unknown"):
         log_event({"event": "bars_unavailable", "symbol": symbol_ibkr, "context": context, "cause": "no_rth_rows"})
         return None
     return rth
+
+
+def _last_bar_close(symbol: str) -> float | None:
+    """Latest 5-min bar close, as a fill-price stand-in when avgFillPrice
+    hasn't settled. A real traded price, unlike get_current_price's
+    delayed quote."""
+    bars = get_5m_bars(symbol, context="fill_price_fallback")
+    if bars is None or bars.empty:
+        return None
+    return float(bars["Close"].iloc[-1])
 
 
 def _bars_are_fresh(bars) -> bool:
@@ -444,13 +462,12 @@ def manage_position(ib, pos: dict, rules: dict) -> dict | None:
                 log_event({"event": "new_high_sell_failed", "symbol": symbol, "status": status})
                 pos["stop_order_id"] = _place_stop(ib, symbol, pos["qty"], pos["current_stop_price"])
                 return pos
-            # avgFillPrice is only populated once the fill actually
-            # settles -- _market_order's wait loop can return as soon as
-            # the order merely reaches "Submitted", before that happens.
-            # Falling back to 0.0 (as this used to) silently corrupts
-            # every downstream P&L calc from smc_trades.csv; the last
-            # bar's close is a much closer stand-in for what a market
-            # order actually filled near.
+            # _market_order waits for a settled status, so avgFillPrice is
+            # normally populated by here; this fallback covers a fill that
+            # misses ORDER_FILL_TIMEOUT_SECS. Falling back to 0.0 (as this
+            # once did) silently corrupts every downstream P&L calc from
+            # smc_trades.csv, and the last bar's close is a far closer
+            # stand-in for where a market order actually filled.
             fill_price = trade.orderStatus.avgFillPrice or float(today_bars["Close"].iloc[-1])
             append_trade_row(symbol, "SELL", pos["qty"], fill_price, trade.order.orderId, status, "new_high_exit")
             pnl = (fill_price - pos["entry_price"]) * pos["qty"] if fill_price else None
@@ -482,12 +499,15 @@ def force_close_all(ib, positions: list[dict]) -> list[dict]:
             )
             still_open.append(pos)
         else:
-            # See manage_position's new_high_exit branch: avgFillPrice can
-            # still be unset at this point, and falling back to 0.0 (as
-            # this used to) silently corrupts every downstream P&L calc
-            # from smc_trades.csv. No bars are already in hand here, so
-            # fetch the current price as the closest stand-in instead.
-            fill_price = trade.orderStatus.avgFillPrice or get_current_price(ib, pos["symbol"]) or 0.0
+            # Same as manage_position's new_high_exit branch: avgFillPrice
+            # is normally set now that _market_order waits for a settled
+            # status, but a fill can still miss the timeout, and 0.0 (as
+            # this once used) corrupts downstream P&L. This used to stand
+            # in with get_current_price, which is worse than it looks:
+            # IBKRClient requests MARKET_DATA_TYPE = 3, ~15-20 min lagged,
+            # the same staleness that was firing TP1 on prices the stock
+            # had already left. A bar close is a real traded price.
+            fill_price = trade.orderStatus.avgFillPrice or _last_bar_close(pos["symbol"]) or 0.0
             append_trade_row(
                 pos["symbol"], "SELL", pos["qty"], fill_price, trade.order.orderId, status, "same_day_force_close"
             )
