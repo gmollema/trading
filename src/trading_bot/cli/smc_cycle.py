@@ -434,7 +434,12 @@ def manage_position(ib, pos: dict, rules: dict) -> dict | None:
                 fill_price = trade.orderStatus.avgFillPrice or float(today_bars["Close"].iloc[-1])
                 append_trade_row(symbol, "SELL", partial_qty, fill_price, trade.order.orderId, status, "tp1")
                 pos["qty"] -= partial_qty
-                notify(f"SMC TP1 {symbol}", f"sold {partial_qty} @ ${fill_price:.2f}, stop -> BE", "default")
+                partial_pnl = (fill_price - pos["entry_price"]) * partial_qty
+                notify(
+                    f"SMC TP1 {symbol}",
+                    f"sold {partial_qty} @ ${fill_price:.2f}, P&L ${partial_pnl:+.2f}, stop -> BE",
+                    "default",
+                )
 
             # Signal-level behavior: the stop moves to breakeven on the TP1
             # touch even when the partial itself rounds away to 0 shares.
