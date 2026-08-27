@@ -277,6 +277,136 @@ class _FakeIB:
         return [stock]
 
 
+class _FakeOrder:
+    def __init__(self, order_id):
+        self.orderId = order_id
+
+
+class _StopTrade:
+    def __init__(self, statuses, order_id=77, avg_fill=0.0):
+        self.orderStatus = _FakeOrderStatus(statuses)
+        # manage_position reads avgFillPrice off the sell it just placed.
+        self.orderStatus.avgFillPrice = avg_fill
+        self.order = _FakeOrder(order_id)
+
+
+class TestPlaceStopConfirmsPlacement(unittest.TestCase):
+    """A rejected stop must not look like a live one. Previously _place_stop
+    returned the orderId unconditionally, so the position carried on with a
+    stop_order_id set and nothing actually resting behind it."""
+
+    def _run(self, statuses):
+        ib = _FakeIB(_StopTrade(statuses))
+        events, notes = [], []
+        with patch.object(smc_cycle, "_qualify", side_effect=lambda _ib, sym: sym),              patch.object(smc_cycle, "log_event", side_effect=events.append),              patch.object(smc_cycle, "notify", side_effect=lambda *a, **k: notes.append(a)):
+            result = smc_cycle._place_stop(ib, "KLAC", 40, 182.0512)
+        return result, events, notes
+
+    def test_rejected_stop_returns_none(self):
+        result, events, notes = self._run(["PendingSubmit", "Rejected"])
+        self.assertIsNone(result)
+        self.assertEqual([e["event"] for e in events], ["place_stop_failed"])
+        self.assertEqual(events[0]["stop_price"], 182.05)  # rounded to a tick
+        self.assertEqual(notes[0][2], "high")  # paged, not a routine note
+
+    def test_presubmitted_is_a_resting_stop(self):
+        result, events, _ = self._run(["PendingSubmit", "PreSubmitted"])
+        self.assertEqual(result, 77)
+        self.assertEqual(events, [])
+
+    def test_submitted_is_accepted_too(self):
+        result, _, _ = self._run(["Submitted"])
+        self.assertEqual(result, 77)
+
+    def test_still_pending_keeps_the_id_but_flags_it(self):
+        """Returning None here would orphan an order that may be live and
+        let a caller place a second one for the same shares."""
+        with patch.object(smc_cycle, "STOP_CONFIRM_TIMEOUT_SECS", 2):
+            result, events, _ = self._run(["PendingSubmit"])
+        self.assertEqual(result, 77)
+        self.assertEqual([e["event"] for e in events], ["place_stop_unconfirmed"])
+
+    def test_cancelled_counts_as_failure(self):
+        result, events, _ = self._run(["Cancelled"])
+        self.assertIsNone(result)
+        self.assertEqual(events[0]["status"], "Cancelled")
+
+
+class TestBreakevenStopIsPlaceable(unittest.TestCase):
+    """TP1 arms off a bar high that can be several bars old, so price may sit
+    below entry when the cycle acts. A sell stop above the last traded price
+    is not a resting order, so breakeven has to be clamped under the market."""
+
+    RULES = {"tp1_fraction": 0.25, "swing_window": 20}
+
+    def _run_tp1(self, last_close):
+        bars = _ohlc_bars([182.10, 183.40, last_close], closes=[182.00, 183.00, last_close])
+        pos = {
+            "symbol": "KLAC", "entry_price": 182.05, "qty": 54, "original_qty": 54,
+            "stop_price": 180.44, "current_stop_price": 180.44, "stop_order_id": 9,
+            "tp1_price": 183.32, "tp1_done": False,
+            "entry_bar_iso": bars.index[0].isoformat(),
+        }
+        placed, events = [], []
+        with patch.object(smc_cycle, "get_5m_bars", return_value=bars),              patch.object(smc_cycle, "_cancel_stop", return_value=True),              patch.object(smc_cycle, "_market_order",
+                          return_value=_StopTrade(["Filled"], order_id=12, avg_fill=183.30)),              patch.object(smc_cycle, "_place_stop",
+                          side_effect=lambda _ib, _s, _q, price: placed.append(price) or 55),              patch.object(smc_cycle, "append_trade_row"),              patch.object(smc_cycle, "notify"),              patch.object(smc_cycle, "log_event", side_effect=events.append):
+            out = smc_cycle.manage_position(object(), pos, self.RULES)
+        return out, placed, events
+
+    def test_stop_is_clamped_below_market_when_price_fell_under_entry(self):
+        _, placed, events = self._run_tp1(last_close=181.50)
+        ceiling = 181.50 * (1 - smc_cycle.STOP_BELOW_MARKET_BUFFER_BPS / 10_000)
+        self.assertAlmostEqual(placed[-1], ceiling)
+        self.assertLess(placed[-1], 182.05)  # not the unplaceable breakeven
+        clamped = [e for e in events if e["event"] == "tp1_stop_clamped"]
+        self.assertEqual(len(clamped), 1)
+        self.assertEqual(clamped[0]["wanted"], 182.05)
+
+    def test_breakeven_is_used_unchanged_when_price_is_above_entry(self):
+        out, placed, events = self._run_tp1(last_close=184.00)
+        self.assertAlmostEqual(placed[-1], 182.05)
+        self.assertEqual([e for e in events if e["event"] == "tp1_stop_clamped"], [])
+        self.assertTrue(out["tp1_done"])
+
+
+class TestUnprotectedPositionIsRepaired(unittest.TestCase):
+    """A position whose stop placement failed must get another attempt on the
+    next cycle rather than running naked for the rest of the trade."""
+
+    RULES = {"tp1_fraction": 0.25, "swing_window": 20}
+
+    def _run(self, stop_order_id, place_returns):
+        pos = {
+            "symbol": "KLAC", "entry_price": 182.05, "qty": 54, "original_qty": 54,
+            "stop_price": 180.44, "current_stop_price": 180.44,
+            "stop_order_id": stop_order_id, "tp1_price": None, "tp1_done": True,
+            "entry_bar_iso": "not-a-timestamp",
+        }
+        placed, events = [], []
+        with patch.object(smc_cycle, "get_5m_bars", return_value=None),              patch.object(smc_cycle, "_place_stop",
+                          side_effect=lambda _ib, _s, _q, price: placed.append(price) or place_returns),              patch.object(smc_cycle, "log_event", side_effect=events.append):
+            out = smc_cycle.manage_position(object(), pos, self.RULES)
+        return out, placed, events
+
+    def test_missing_stop_triggers_a_replacement(self):
+        out, placed, events = self._run(stop_order_id=None, place_returns=61)
+        self.assertEqual(placed, [180.44])
+        self.assertEqual(out["stop_order_id"], 61)
+        self.assertIn("stop_replaced", [e["event"] for e in events])
+
+    def test_existing_stop_is_left_alone(self):
+        _, placed, events = self._run(stop_order_id=9, place_returns=61)
+        self.assertEqual(placed, [])
+        self.assertNotIn("stop_replaced", [e["event"] for e in events])
+
+    def test_failed_replacement_leaves_it_unprotected_and_silent_about_success(self):
+        out, placed, events = self._run(stop_order_id=None, place_returns=None)
+        self.assertEqual(placed, [180.44])
+        self.assertIsNone(out["stop_order_id"])
+        self.assertNotIn("stop_replaced", [e["event"] for e in events])
+
+
 class TestMarketOrderWaitsForFill(unittest.TestCase):
     """_market_order must wait for a settled status, not for "Submitted"."""
 

@@ -51,7 +51,15 @@ SMC_HEARTBEAT_PATH = Path("smc_heartbeat.json")
 
 SETTLED_ORDER_STATUSES = {"Filled", "Cancelled", "ApiCancelled", "Inactive", "Rejected"}
 FAILED_SELL_STATUSES = {"Cancelled", "ApiCancelled", "Inactive", "Rejected"}
+# A stop that IBKR has accepted onto the book. "PreSubmitted" is the normal
+# resting state for a stop held at IBKR until triggered.
+RESTING_STOP_STATUSES = {"PreSubmitted", "Submitted"}
 CANCEL_CONFIRM_TIMEOUT_SECS = 5
+STOP_CONFIRM_TIMEOUT_SECS = 5
+# The market reference for clamping a stop is the last 5-min bar close, which
+# can be minutes stale, so aim this far under it to leave room for drift
+# between that close and the live book.
+STOP_BELOW_MARKET_BUFFER_BPS = 10
 ORDER_FILL_TIMEOUT_SECS = 10
 BAR_STALENESS_LIMIT_MINUTES = 20
 
@@ -207,11 +215,49 @@ def _cancel_stop(ib, stop_order_id) -> bool:
 
 
 def _place_stop(ib, symbol: str, qty: int, stop_price: float) -> int | None:
+    """Place the protective stop and confirm IBKR actually rested it.
+
+    Returns None when the order did not survive. This used to return
+    trade.order.orderId unconditionally, so a rejection was
+    indistinguishable from a live stop: the position carried on with a
+    stop_order_id set and no protection behind it. A sell stop above the
+    market is not a valid resting order, and TP1's breakeven move can ask
+    for exactly that (see the clamp in manage_position), which makes the
+    rejection path reachable rather than theoretical.
+
+    _cancel_stop already confirms the opposite direction -- "callers must
+    not place an overlapping order for the same shares" -- so this is the
+    same care applied to placing. Callers must treat None as "unprotected"
+    and retry; manage_position does so on its next pass."""
     contract = _qualify(ib, symbol)
     order = StopOrder("SELL", qty, round(float(stop_price), 2))
     order.outsideRth = True
     trade = ib.placeOrder(contract, order)
-    ib.sleep(1)
+
+    for _ in range(STOP_CONFIRM_TIMEOUT_SECS):
+        ib.sleep(1)
+        status = trade.orderStatus.status
+        if status in FAILED_SELL_STATUSES:
+            log_event({
+                "event": "place_stop_failed", "symbol": symbol, "qty": qty,
+                "stop_price": round(float(stop_price), 2), "status": status,
+            })
+            notify(
+                f"SMC STOP NOT PLACED {symbol}",
+                f"{qty} @ ${stop_price:.2f} rejected ({status}) -- position UNPROTECTED",
+                "high",
+            )
+            return None
+        if status in RESTING_STOP_STATUSES:
+            return trade.order.orderId
+
+    # Still pending after the timeout. Returning None here would orphan an
+    # order that may well be live and then let a caller place a second one
+    # for the same shares, so report the ambiguity and keep the id.
+    log_event({
+        "event": "place_stop_unconfirmed", "symbol": symbol, "qty": qty,
+        "stop_price": round(float(stop_price), 2), "status": trade.orderStatus.status,
+    })
     return trade.order.orderId
 
 
@@ -413,6 +459,19 @@ def manage_position(ib, pos: dict, rules: dict) -> dict | None:
     """Returns the (possibly updated) position, or None once fully closed."""
     symbol = pos["symbol"]
 
+    # _place_stop returns None when IBKR refused the order, which leaves the
+    # position carrying real risk with nothing behind it. Retry before doing
+    # anything else with this position, so an unprotected window lasts one
+    # cycle rather than the whole trade.
+    if not pos.get("stop_order_id") and pos.get("current_stop_price") is not None:
+        recovered = _place_stop(ib, symbol, pos["qty"], pos["current_stop_price"])
+        if recovered:
+            pos["stop_order_id"] = recovered
+            log_event({
+                "event": "stop_replaced", "symbol": symbol, "qty": pos["qty"],
+                "stop_price": round(float(pos["current_stop_price"]), 2),
+            })
+
     # Today's post-entry bars drive BOTH the TP1 touch check and the
     # new-high exit below, so fetch and index them once here. yfinance is
     # the flakiest dependency in the cycle and this path used to expose
@@ -465,7 +524,24 @@ def manage_position(ib, pos: dict, rules: dict) -> dict | None:
 
             # Signal-level behavior: the stop moves to breakeven on the TP1
             # touch even when the partial itself rounds away to 0 shares.
-            new_stop = pos["entry_price"]
+            #
+            # But "breakeven" is only placeable while it sits BELOW the
+            # market. TP1 arms off a bar high that may be several bars old
+            # (bars_since_touch), so price can already be under entry by the
+            # time this cycle runs -- asking for a sell stop above the last
+            # traded price, which IBKR will not rest. Clamp to just under the
+            # most recent real traded price; in the pathological case that
+            # lands at the market and exits promptly, which is the honest
+            # outcome once entry is no longer defensible.
+            market_ref = float(today_bars["Close"].iloc[-1])
+            placeable_ceiling = market_ref * (1 - STOP_BELOW_MARKET_BUFFER_BPS / 10_000)
+            new_stop = min(pos["entry_price"], placeable_ceiling)
+            if new_stop < pos["entry_price"]:
+                log_event({
+                    "event": "tp1_stop_clamped", "symbol": symbol,
+                    "wanted": round(pos["entry_price"], 2), "placed": round(new_stop, 2),
+                    "market_ref": round(market_ref, 2),
+                })
             pos["stop_order_id"] = _place_stop(ib, symbol, pos["qty"], new_stop)
             pos["current_stop_price"] = new_stop
             pos["tp1_done"] = True
