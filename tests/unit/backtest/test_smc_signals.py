@@ -408,6 +408,28 @@ class TestPostTp1StopFraction(unittest.TestCase):
             # After TP1 the stop must still be the untouched initial stop.
             self.assertEqual(trade["stop_price"], trade["initial_stop_price"])
 
+    def test_post_tp1_stop_is_clamped_to_the_last_traded_price(self):
+        """A stop must never be placed above the bar close that set it --
+        otherwise a large fraction books exits at prices the market never
+        printed, and the sweep rewards impossible fills."""
+        bars = _bars(self.ROWS)
+        for frac in (1.25, 2.0, 5.0, 50.0):
+            trades = smc.find_smc_long_trades(bars, post_tp1_stop_fraction=frac)
+            for tr in trades:
+                tp1_fill = next((f for f in tr["fills"] if f["reason"] == "tp1"), None)
+                if tp1_fill is None:
+                    continue
+                close_at_tp1 = self.ROWS[tp1_fill["idx"]][3]
+                self.assertLessEqual(tr["stop_price"], close_at_tp1, msg=f"fraction={frac}")
+
+    def test_huge_fractions_stop_improving_once_clamped(self):
+        """Sanity guard on the clamp: absurd fractions must converge rather
+        than keep paying more."""
+        bars = _bars(self.ROWS)
+        a = smc.find_smc_long_trades(bars, post_tp1_stop_fraction=10.0)
+        b = smc.find_smc_long_trades(bars, post_tp1_stop_fraction=1000.0)
+        self.assertEqual(a, b)
+
     def test_fraction_above_one_puts_the_stop_past_entry(self):
         bars = _bars(self.ROWS)
         trade = smc.find_smc_long_trades(bars, post_tp1_stop_fraction=2.0)[0]

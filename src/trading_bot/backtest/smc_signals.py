@@ -294,9 +294,15 @@ def find_smc_long_trades(
                     })
                     pos["remaining_fraction"] = round(pos["remaining_fraction"] - tp1_fraction, 6)
                     # Default 1.0 lands exactly on entry_price (breakeven).
-                    pos["stop_price"] = pos["initial_stop_price"] + post_tp1_stop_fraction * (
+                    new_stop = pos["initial_stop_price"] + post_tp1_stop_fraction * (
                         pos["entry_price"] - pos["initial_stop_price"]
                     )
+                    # A stop cannot rest ABOVE the last traded price: live, that
+                    # order is rejected or fires instantly at market. Without
+                    # this clamp, post_tp1_stop_fraction > 1 books exits at
+                    # prices the bars never offered, and the metric improves
+                    # monotonically on fills that cannot happen.
+                    pos["stop_price"] = min(new_stop, closes[i])
                     pos["tp1_done"] = True
 
                 # full exit on the first confirmed swing high after entry
