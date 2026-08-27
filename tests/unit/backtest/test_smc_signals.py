@@ -299,5 +299,75 @@ class TestConfirmedNewHighExit(unittest.TestCase):
         self.assertFalse(smc.confirmed_new_high_exit(self.HIGHS[:12], entry_idx=8, swing_window=2))
 
 
+class TestSlippage(unittest.TestCase):
+    """Slippage must move fills adversely without changing WHICH bar triggers
+    them -- a level is still touched at exactly the same index, only the
+    recorded price differs. The lifecycle fixture (entry @ 11 on idx 8,
+    new_high_exit @ 17 on idx 11) is reused as the reference."""
+
+    LIFECYCLE_ROWS = [
+        (10, 10, 9, 10), (10, 10, 9, 10), (12, 12, 11, 12), (10, 10, 9, 10), (10, 10, 9, 10),
+        (11, 11, 8, 9), (9, 17, 12, 16), (16, 20, 16, 19), (19, 19, 10, 13),
+        (13, 16, 13, 15), (15, 19, 15, 18), (18, 25, 17, 17), (17, 20, 15, 16), (16, 18, 13, 14),
+    ]
+    STOP_OUT_ROWS = [
+        (10, 10, 9, 10), (10, 10, 9, 10), (12, 12, 11, 12), (10, 10, 9, 10), (10, 10, 9, 10),
+        (11, 11, 8, 9), (9, 17, 12, 16), (16, 20, 16, 19), (19, 19, 10, 13),
+        (13, 13, 5, 6),
+    ]
+
+    def test_none_and_zero_match_the_frictionless_baseline(self):
+        bars = _bars(self.LIFECYCLE_ROWS)
+        baseline = smc.find_smc_long_trades(bars)
+        for spec in (None, 0, 0.0, {}, {"entry": 0.0}):
+            self.assertEqual(smc.find_smc_long_trades(bars, slippage_bps=spec), baseline, msg=f"spec={spec!r}")
+
+    def test_buy_slips_up_and_sell_slips_down(self):
+        bars = _bars(self.LIFECYCLE_ROWS)
+        trades = smc.find_smc_long_trades(bars, slippage_bps={"entry": 100, "new_high_exit": 100})
+        self.assertEqual(len(trades), 1)
+        trade = trades[0]
+        self.assertEqual(trade["entry_idx"], 8)  # same bar as the frictionless run
+        self.assertAlmostEqual(trade["entry_price"], 11 * 1.01)  # buy fills HIGHER
+        self.assertEqual(trade["fills"][0]["idx"], 11)
+        self.assertAlmostEqual(trade["fills"][0]["price"], 17 * 0.99)  # sell fills LOWER
+
+    def test_initial_stop_price_is_never_slipped(self):
+        """Sizing reads initial_stop_price, so it must stay the raw OB low --
+        slipping the entry widens real risk rather than hiding it."""
+        bars = _bars(self.LIFECYCLE_ROWS)
+        trade = smc.find_smc_long_trades(bars, slippage_bps={"entry": 250})[0]
+        self.assertEqual(trade["initial_stop_price"], 8)
+        self.assertGreater(trade["entry_price"], 11)
+
+    def test_stop_triggers_on_the_true_level_but_fills_worse(self):
+        bars = _bars(self.STOP_OUT_ROWS)
+        trades = smc.find_smc_long_trades(bars, slippage_bps={"stop": 50})
+        fill = trades[0]["fills"][0]
+        self.assertEqual(fill["reason"], "stop")
+        self.assertEqual(fill["idx"], 9)  # unchanged trigger bar
+        self.assertAlmostEqual(fill["price"], 8 * 0.995)
+
+    def test_scalar_applies_to_every_leg(self):
+        bars = _bars(self.LIFECYCLE_ROWS)
+        trade = smc.find_smc_long_trades(bars, slippage_bps=100)[0]
+        self.assertAlmostEqual(trade["entry_price"], 11 * 1.01)
+        self.assertAlmostEqual(trade["fills"][0]["price"], 17 * 0.99)
+
+    def test_unknown_reason_key_is_rejected(self):
+        with self.assertRaises(ValueError) as ctx:
+            smc.find_smc_long_trades(_bars(self.LIFECYCLE_ROWS), slippage_bps={"stop_loss": 10})
+        self.assertIn("stop_loss", str(ctx.exception))
+
+    def test_breakeven_stop_becomes_a_loss(self):
+        """The point of the whole feature: post-TP1 the stop sits at
+        entry_price, so with zero slippage the runner leg is exactly $0
+        every time. With slippage it must come back BELOW entry."""
+        entry = 100.0
+        self.assertEqual(smc._slipped(entry, 0, "sell"), entry)
+        self.assertLess(smc._slipped(entry, 10, "sell"), entry)
+        self.assertAlmostEqual(smc._slipped(entry, 10, "sell"), 99.9)
+
+
 if __name__ == "__main__":
     unittest.main()

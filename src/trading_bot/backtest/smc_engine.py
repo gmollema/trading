@@ -71,6 +71,7 @@ def build_smc_candidates(
     daily_trend_filter: bool = False,
     daily_dir: Path = DAILY_DIR,
     force_close_same_day: bool = False,
+    slippage_bps: dict | float | None = None,
 ) -> list[tuple]:
     """Per-symbol signal generation only (see module docstring, phase 1) --
     independent of everything portfolio-level (equity, sizing, concurrency,
@@ -99,7 +100,7 @@ def build_smc_candidates(
         }
         for trade in find_smc_long_trades(
             bars, time_window_bars, tp1_fraction, swing_window, require_confirmed_trend,
-            force_close_same_day,
+            force_close_same_day, slippage_bps,
         ):
             if uptrend_dates is not None and trade["entry_date"].date() not in uptrend_dates:
                 continue
@@ -310,6 +311,7 @@ def run_smc_backtest(
     daily_trend_filter: bool = False,
     daily_dir: Path = DAILY_DIR,
     force_close_same_day: bool = False,
+    slippage_bps: dict | float | None = None,
     reactive_derisk_window: int | None = None,
     reactive_derisk_pf_threshold: float = DEFAULT_REACTIVE_DERISK_PF_THRESHOLD,
     reactive_derisk_size_mult: float = DEFAULT_REACTIVE_DERISK_SIZE_MULT,
@@ -326,7 +328,7 @@ def run_smc_backtest(
     full parameter docs."""
     candidates = build_smc_candidates(
         tickers, intraday_dir, time_window_bars, tp1_fraction, swing_window, require_confirmed_trend,
-        daily_trend_filter, daily_dir, force_close_same_day,
+        daily_trend_filter, daily_dir, force_close_same_day, slippage_bps,
     )
     return simulate_smc_portfolio(
         candidates, initial_capital, risk_pct, max_position_pct, max_concurrent_positions,

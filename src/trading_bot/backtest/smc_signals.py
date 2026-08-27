@@ -98,6 +98,43 @@ def _find_ob_candle(opens: list[float], closes: list[float], break_idx: int) -> 
     return None
 
 
+# Fill-side slippage, in basis points, keyed by the fill's `reason`.
+#
+# The backtest triggers on a bar level but must not FILL at it: every live
+# exit is a market order sent after the level is touched, and the entry is
+# a market order sent after the OB high is retested. Modelling zero
+# slippage makes two trade classes look better than they can be -- the
+# breakeven stop (which fills at exactly entry, so the runner leg is
+# exactly $0 across every such trade) and the TP1 partial (which fills at
+# exactly tp1_price, where the live bot's market order came in 49 bps
+# lower on the first real fill we have). Defaults are 0.0 so existing
+# callers -- including smc_live.py -- are byte-for-byte unchanged.
+SLIPPAGE_REASONS = ("entry", "stop", "tp1", "new_high_exit", "same_day_force_close", "end_of_data")
+DEFAULT_SLIPPAGE_BPS = {r: 0.0 for r in SLIPPAGE_REASONS}
+
+
+def _normalize_slippage_bps(slippage_bps: dict | float | int | None) -> dict:
+    """Accept None (no slippage), a scalar applied to every leg, or a partial
+    dict keyed by fill reason. Unknown keys are rejected rather than silently
+    ignored -- a typo'd reason would otherwise read as "no slippage there"."""
+    if slippage_bps is None:
+        return dict(DEFAULT_SLIPPAGE_BPS)
+    if isinstance(slippage_bps, (int, float)):
+        return {r: float(slippage_bps) for r in SLIPPAGE_REASONS}
+    unknown = set(slippage_bps) - set(SLIPPAGE_REASONS)
+    if unknown:
+        raise ValueError(f"unknown slippage_bps keys: {sorted(unknown)}; expected {list(SLIPPAGE_REASONS)}")
+    return {r: float(slippage_bps.get(r, 0.0)) for r in SLIPPAGE_REASONS}
+
+
+def _slipped(price: float, bps: float, side: str) -> float:
+    """Move `price` adversely by `bps`: a buy fills higher, a sell lower."""
+    if not bps:
+        return price
+    factor = 1.0 + bps / 10_000.0 if side == "buy" else 1.0 - bps / 10_000.0
+    return price * factor
+
+
 def find_smc_long_trades(
     bars: dict,
     time_window_bars: int = DEFAULT_TIME_WINDOW_BARS,
@@ -105,6 +142,7 @@ def find_smc_long_trades(
     swing_window: int = DEFAULT_SWING_WINDOW,
     require_confirmed_trend: bool = False,
     force_close_same_day: bool = False,
+    slippage_bps: dict | float | None = None,
 ) -> list[dict]:
     """Scan one symbol's chronological 5-min bars and return every long
     trade this Level 1 SMC strategy would have taken, fully simulated
@@ -133,6 +171,16 @@ def find_smc_long_trades(
             (reason "same_day_force_close"), instead of letting it ride
             into the next session and risk gapping through its stop
             before the next open.
+        slippage_bps: adverse fill slippage in basis points -- None or 0
+            for the frictionless fills this backtest historically assumed,
+            a scalar for one rate across every leg, or a dict keyed by
+            fill reason (see SLIPPAGE_REASONS) to price the legs
+            separately, which is usually what you want: a resting stop
+            and a market-order TP1 do not slip alike. Levels still
+            TRIGGER exactly as before; only the recorded fill price
+            moves, adversely (buys higher, sells lower). Note this makes
+            the post-TP1 breakeven stop a small LOSS rather than a
+            guaranteed scratch, which is the realistic outcome.
 
     Returns:
         list of dicts: {entry_idx, entry_date, entry_price, stop_price,
@@ -147,6 +195,7 @@ def find_smc_long_trades(
         position sizing) must use `initial_stop_price`, not `stop_price`.
     """
     opens, highs, lows, closes, dates = bars["open"], bars["high"], bars["low"], bars["close"], bars["date"]
+    slip = _normalize_slippage_bps(slippage_bps)
     n = len(closes)
     if n < 10:
         return []
@@ -214,7 +263,8 @@ def find_smc_long_trades(
             pos = open_trade
             if lows[i] <= pos["stop_price"]:
                 pos["fills"].append({
-                    "idx": i, "date": dates[i], "price": pos["stop_price"],
+                    "idx": i, "date": dates[i],
+                    "price": _slipped(pos["stop_price"], slip["stop"], "sell"),
                     "qty_fraction": pos["remaining_fraction"], "reason": "stop",
                 })
                 trades.append(pos)
@@ -222,7 +272,8 @@ def find_smc_long_trades(
             else:
                 if not pos["tp1_done"] and pos["tp1_price"] is not None and highs[i] >= pos["tp1_price"]:
                     pos["fills"].append({
-                        "idx": i, "date": dates[i], "price": pos["tp1_price"],
+                        "idx": i, "date": dates[i],
+                        "price": _slipped(pos["tp1_price"], slip["tp1"], "sell"),
                         "qty_fraction": tp1_fraction, "reason": "tp1",
                     })
                     pos["remaining_fraction"] = round(pos["remaining_fraction"] - tp1_fraction, 6)
@@ -234,7 +285,8 @@ def find_smc_long_trades(
                     for sh_idx, _ in swing_highs:
                         if pos["entry_idx"] < sh_idx <= i and sh_idx + swing_window <= i:
                             pos["fills"].append({
-                                "idx": sh_idx, "date": dates[sh_idx], "price": closes[sh_idx],
+                                "idx": sh_idx, "date": dates[sh_idx],
+                                "price": _slipped(closes[sh_idx], slip["new_high_exit"], "sell"),
                                 "qty_fraction": pos["remaining_fraction"], "reason": "new_high_exit",
                             })
                             trades.append(pos)
@@ -247,7 +299,8 @@ def find_smc_long_trades(
                 and (i == n - 1 or dates[i].date() != dates[i + 1].date())
             ):
                 pos["fills"].append({
-                    "idx": i, "date": dates[i], "price": closes[i],
+                    "idx": i, "date": dates[i],
+                    "price": _slipped(closes[i], slip["same_day_force_close"], "sell"),
                     "qty_fraction": pos["remaining_fraction"], "reason": "same_day_force_close",
                 })
                 trades.append(pos)
@@ -263,7 +316,7 @@ def find_smc_long_trades(
         if open_trade is None and pending_bull_obs and entry_window_open:
             for ob in pending_bull_obs:
                 if ob["ob_idx"] < i and lows[i] <= ob["ob_high"]:
-                    entry_price = ob["ob_high"]
+                    entry_price = _slipped(ob["ob_high"], slip["entry"], "buy")
                     stop_price = ob["ob_low"]
                     if entry_price <= stop_price:
                         continue  # degenerate OB, skip
@@ -284,7 +337,8 @@ def find_smc_long_trades(
     # End-of-data safety net: close any still-open trade at the last bar.
     if open_trade is not None:
         open_trade["fills"].append({
-            "idx": n - 1, "date": dates[n - 1], "price": closes[n - 1],
+            "idx": n - 1, "date": dates[n - 1],
+            "price": _slipped(closes[n - 1], slip["end_of_data"], "sell"),
             "qty_fraction": open_trade["remaining_fraction"], "reason": "end_of_data",
         })
         trades.append(open_trade)
