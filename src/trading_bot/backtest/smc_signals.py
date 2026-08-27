@@ -148,6 +148,7 @@ def find_smc_long_trades(
     force_close_same_day: bool = False,
     slippage_bps: dict | float | None = None,
     post_tp1_stop_fraction: float = DEFAULT_POST_TP1_STOP_FRACTION,
+    exit_fully_at_tp1: bool = False,
 ) -> list[dict]:
     """Scan one symbol's chronological 5-min bars and return every long
     trade this Level 1 SMC strategy would have taken, fully simulated
@@ -197,6 +198,15 @@ def find_smc_long_trades(
             because breakeven is not free: it converts a large share of
             trades into scratches that still occupy one of the portfolio's
             concurrent-position slots.
+        exit_fully_at_tp1: sell the ENTIRE position at tp1_price instead of
+            tp1_fraction of it, ending the trade there -- no runner, no
+            breakeven stop, no new-high exit. This is the exit policy that
+            post_tp1_stop_fraction >= 1.5 degenerated into once the
+            above-market stop was clamped, expressed directly so it can be
+            measured on its own fills (at tp1_price on the touching bar)
+            rather than inferred from a stop resting at some earlier bar's
+            close. Mutually exclusive with post_tp1_stop_fraction, which
+            has nothing left to place.
 
     Returns:
         list of dicts: {entry_idx, entry_date, entry_price, stop_price,
@@ -287,26 +297,33 @@ def find_smc_long_trades(
                 open_trade = None
             else:
                 if not pos["tp1_done"] and pos["tp1_price"] is not None and highs[i] >= pos["tp1_price"]:
+                    exit_qty = pos["remaining_fraction"] if exit_fully_at_tp1 else tp1_fraction
                     pos["fills"].append({
                         "idx": i, "date": dates[i],
                         "price": _slipped(pos["tp1_price"], slip["tp1"], "sell"),
-                        "qty_fraction": tp1_fraction, "reason": "tp1",
+                        "qty_fraction": exit_qty, "reason": "tp1",
                     })
-                    pos["remaining_fraction"] = round(pos["remaining_fraction"] - tp1_fraction, 6)
-                    # Default 1.0 lands exactly on entry_price (breakeven).
-                    new_stop = pos["initial_stop_price"] + post_tp1_stop_fraction * (
-                        pos["entry_price"] - pos["initial_stop_price"]
-                    )
-                    # A stop cannot rest ABOVE the last traded price: live, that
-                    # order is rejected or fires instantly at market. Without
-                    # this clamp, post_tp1_stop_fraction > 1 books exits at
-                    # prices the bars never offered, and the metric improves
-                    # monotonically on fills that cannot happen.
-                    pos["stop_price"] = min(new_stop, closes[i])
+                    pos["remaining_fraction"] = round(pos["remaining_fraction"] - exit_qty, 6)
                     pos["tp1_done"] = True
+                    if exit_fully_at_tp1:
+                        # Whole position gone at TP1: no runner, so no stop to
+                        # move and nothing for the exit rules below to manage.
+                        trades.append(pos)
+                        open_trade = None
+                    else:
+                        # Default 1.0 lands exactly on entry_price (breakeven).
+                        new_stop = pos["initial_stop_price"] + post_tp1_stop_fraction * (
+                            pos["entry_price"] - pos["initial_stop_price"]
+                        )
+                        # A stop cannot rest ABOVE the last traded price: live, that
+                        # order is rejected or fires instantly at market. Without
+                        # this clamp, post_tp1_stop_fraction > 1 books exits at
+                        # prices the bars never offered, and the metric improves
+                        # monotonically on fills that cannot happen.
+                        pos["stop_price"] = min(new_stop, closes[i])
 
                 # full exit on the first confirmed swing high after entry
-                if pos["tp1_done"] or pos["tp1_price"] is None:
+                if open_trade is not None and (pos["tp1_done"] or pos["tp1_price"] is None):
                     for sh_idx, _ in swing_highs:
                         if pos["entry_idx"] < sh_idx <= i and sh_idx + swing_window <= i:
                             pos["fills"].append({

@@ -437,5 +437,55 @@ class TestPostTp1StopFraction(unittest.TestCase):
             self.assertGreater(trade["stop_price"], trade["entry_price"])
 
 
+class TestExitFullyAtTp1(unittest.TestCase):
+    """The whole position leaves at tp1_price; there is no runner afterwards,
+    so no breakeven stop and no new-high exit can fire."""
+
+    ROWS = TestPostTp1StopFraction.ROWS
+
+    def test_default_is_off(self):
+        bars = _bars(self.ROWS)
+        self.assertEqual(
+            smc.find_smc_long_trades(bars),
+            smc.find_smc_long_trades(bars, exit_fully_at_tp1=False),
+        )
+
+    def test_single_tp1_fill_closes_the_trade(self):
+        bars = _bars(self.ROWS)
+        trades = smc.find_smc_long_trades(bars, exit_fully_at_tp1=True)
+        for tr in trades:
+            reasons = [f["reason"] for f in tr["fills"]]
+            if "tp1" not in reasons:
+                continue
+            self.assertEqual(reasons, ["tp1"], msg="tp1 must be the only, final fill")
+            self.assertEqual(tr["fills"][0]["qty_fraction"], 1.0)
+            self.assertAlmostEqual(tr["remaining_fraction"], 0.0)
+
+    def test_fills_at_the_tp1_level_not_a_later_close(self):
+        bars = _bars(self.ROWS)
+        for tr in smc.find_smc_long_trades(bars, exit_fully_at_tp1=True):
+            for f in tr["fills"]:
+                if f["reason"] == "tp1":
+                    self.assertEqual(f["price"], tr["tp1_price"])
+
+    def test_slippage_still_applies_to_the_full_exit(self):
+        bars = _bars(self.ROWS)
+        clean = smc.find_smc_long_trades(bars, exit_fully_at_tp1=True)
+        slipped = smc.find_smc_long_trades(bars, exit_fully_at_tp1=True, slippage_bps={"tp1": 100})
+        for a, b in zip(clean, slipped):
+            for fa, fb in zip(a["fills"], b["fills"]):
+                if fa["reason"] == "tp1":
+                    self.assertAlmostEqual(fb["price"], fa["price"] * 0.99)
+
+    def test_trades_without_a_tp1_level_are_unaffected(self):
+        """tp1_price is None when no bearish OB sits above entry -- those
+        trades must still run to their new-high exit."""
+        bars = _bars(TestSlippage.LIFECYCLE_ROWS)
+        trades = smc.find_smc_long_trades(bars, exit_fully_at_tp1=True)
+        self.assertEqual(len(trades), 1)
+        self.assertIsNone(trades[0]["tp1_price"])
+        self.assertEqual([f["reason"] for f in trades[0]["fills"]], ["new_high_exit"])
+
+
 if __name__ == "__main__":
     unittest.main()
