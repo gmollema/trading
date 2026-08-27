@@ -19,7 +19,11 @@ from pathlib import Path
 
 from trading_bot.backtest import portfolio
 from trading_bot.backtest.data import DAILY_DIR, INTRADAY_DIR, compute_daily_context, load_daily, load_intraday
-from trading_bot.backtest.smc_signals import DEFAULT_SWING_WINDOW, find_smc_long_trades
+from trading_bot.backtest.smc_signals import (
+    DEFAULT_POST_TP1_STOP_FRACTION,
+    DEFAULT_SWING_WINDOW,
+    find_smc_long_trades,
+)
 
 DEFAULT_MAX_POSITION_PCT = 10.0
 DEFAULT_MAX_CONCURRENT_POSITIONS = 2
@@ -72,6 +76,7 @@ def build_smc_candidates(
     daily_dir: Path = DAILY_DIR,
     force_close_same_day: bool = False,
     slippage_bps: dict | float | None = None,
+    post_tp1_stop_fraction: float = DEFAULT_POST_TP1_STOP_FRACTION,
 ) -> list[tuple]:
     """Per-symbol signal generation only (see module docstring, phase 1) --
     independent of everything portfolio-level (equity, sizing, concurrency,
@@ -100,7 +105,7 @@ def build_smc_candidates(
         }
         for trade in find_smc_long_trades(
             bars, time_window_bars, tp1_fraction, swing_window, require_confirmed_trend,
-            force_close_same_day, slippage_bps,
+            force_close_same_day, slippage_bps, post_tp1_stop_fraction,
         ):
             if uptrend_dates is not None and trade["entry_date"].date() not in uptrend_dates:
                 continue
@@ -312,6 +317,7 @@ def run_smc_backtest(
     daily_dir: Path = DAILY_DIR,
     force_close_same_day: bool = False,
     slippage_bps: dict | float | None = None,
+    post_tp1_stop_fraction: float = DEFAULT_POST_TP1_STOP_FRACTION,
     reactive_derisk_window: int | None = None,
     reactive_derisk_pf_threshold: float = DEFAULT_REACTIVE_DERISK_PF_THRESHOLD,
     reactive_derisk_size_mult: float = DEFAULT_REACTIVE_DERISK_SIZE_MULT,
@@ -329,6 +335,7 @@ def run_smc_backtest(
     candidates = build_smc_candidates(
         tickers, intraday_dir, time_window_bars, tp1_fraction, swing_window, require_confirmed_trend,
         daily_trend_filter, daily_dir, force_close_same_day, slippage_bps,
+        post_tp1_stop_fraction,
     )
     return simulate_smc_portfolio(
         candidates, initial_capital, risk_pct, max_position_pct, max_concurrent_positions,

@@ -109,6 +109,10 @@ def _find_ob_candle(opens: list[float], closes: list[float], break_idx: int) -> 
 # exactly tp1_price, where the live bot's market order came in 49 bps
 # lower on the first real fill we have). Defaults are 0.0 so existing
 # callers -- including smc_live.py -- are byte-for-byte unchanged.
+# Fraction of the entry-to-initial-stop distance the stop covers once TP1
+# fills. 1.0 == move to breakeven, the literal Level 1 spec.
+DEFAULT_POST_TP1_STOP_FRACTION = 1.0
+
 SLIPPAGE_REASONS = ("entry", "stop", "tp1", "new_high_exit", "same_day_force_close", "end_of_data")
 DEFAULT_SLIPPAGE_BPS = {r: 0.0 for r in SLIPPAGE_REASONS}
 
@@ -143,6 +147,7 @@ def find_smc_long_trades(
     require_confirmed_trend: bool = False,
     force_close_same_day: bool = False,
     slippage_bps: dict | float | None = None,
+    post_tp1_stop_fraction: float = DEFAULT_POST_TP1_STOP_FRACTION,
 ) -> list[dict]:
     """Scan one symbol's chronological 5-min bars and return every long
     trade this Level 1 SMC strategy would have taken, fully simulated
@@ -181,6 +186,17 @@ def find_smc_long_trades(
             moves, adversely (buys higher, sells lower). Note this makes
             the post-TP1 breakeven stop a small LOSS rather than a
             guaranteed scratch, which is the realistic outcome.
+        post_tp1_stop_fraction: how far the stop travels from
+            initial_stop_price toward entry_price once TP1 fills, as a
+            fraction of that distance. 1.0 (the default, and the only
+            behavior available before this was a parameter) is the
+            literal Level 1 spec's move to breakeven; 0.0 leaves the
+            original stop untouched and lets the runner keep its full
+            room; values above 1.0 push the stop past entry to lock in
+            profit at the cost of stopping out sooner. Worth sweeping
+            because breakeven is not free: it converts a large share of
+            trades into scratches that still occupy one of the portfolio's
+            concurrent-position slots.
 
     Returns:
         list of dicts: {entry_idx, entry_date, entry_price, stop_price,
@@ -277,7 +293,10 @@ def find_smc_long_trades(
                         "qty_fraction": tp1_fraction, "reason": "tp1",
                     })
                     pos["remaining_fraction"] = round(pos["remaining_fraction"] - tp1_fraction, 6)
-                    pos["stop_price"] = pos["entry_price"]  # move to breakeven
+                    # Default 1.0 lands exactly on entry_price (breakeven).
+                    pos["stop_price"] = pos["initial_stop_price"] + post_tp1_stop_fraction * (
+                        pos["entry_price"] - pos["initial_stop_price"]
+                    )
                     pos["tp1_done"] = True
 
                 # full exit on the first confirmed swing high after entry

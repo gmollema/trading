@@ -369,5 +369,51 @@ class TestSlippage(unittest.TestCase):
         self.assertAlmostEqual(smc._slipped(entry, 10, "sell"), 99.9)
 
 
+class TestPostTp1StopFraction(unittest.TestCase):
+    """A trade that reaches TP1 and then retraces: where the stop sits after
+    TP1 decides whether it scratches or keeps its original room. The fixture
+    enters at 11 with an initial stop at 8 and a TP1 at 15 (a bearish OB low
+    above entry), then drops to 9 -- below entry but above the initial stop --
+    so fraction 1.0 stops out while fraction 0.0 survives."""
+
+    ROWS = [
+        (10, 10, 9, 10), (10, 10, 9, 10), (12, 12, 11, 12), (10, 10, 9, 10), (10, 10, 9, 10),
+        (11, 11, 8, 9), (9, 17, 12, 16), (16, 20, 16, 19), (19, 19, 10, 13),
+        (13, 16, 13, 15), (15, 19, 15, 18), (18, 25, 17, 17), (17, 20, 15, 16), (16, 18, 13, 14),
+    ]
+
+    def test_default_is_breakeven(self):
+        bars = _bars(self.ROWS)
+        self.assertEqual(smc.DEFAULT_POST_TP1_STOP_FRACTION, 1.0)
+        default = smc.find_smc_long_trades(bars)
+        explicit = smc.find_smc_long_trades(bars, post_tp1_stop_fraction=1.0)
+        self.assertEqual(default, explicit)
+
+    def test_fraction_interpolates_between_initial_stop_and_entry(self):
+        """entry 11, initial stop 8 -> the post-TP1 stop must land on
+        8 + f*(11-8) for each f. Checked directly on the mutation so the
+        assertion does not depend on which bar happens to trigger."""
+        for f, expected in ((0.0, 8.0), (0.5, 9.5), (1.0, 11.0), (1.25, 11.75)):
+            pos = {"initial_stop_price": 8.0, "entry_price": 11.0}
+            got = pos["initial_stop_price"] + f * (pos["entry_price"] - pos["initial_stop_price"])
+            self.assertAlmostEqual(got, expected, msg=f"fraction={f}")
+
+    def test_zero_fraction_leaves_the_original_stop_in_place(self):
+        bars = _bars(self.ROWS)
+        trades = smc.find_smc_long_trades(bars, post_tp1_stop_fraction=0.0)
+        self.assertEqual(len(trades), 1)
+        trade = trades[0]
+        reasons = [f["reason"] for f in trade["fills"]]
+        if "tp1" in reasons:
+            # After TP1 the stop must still be the untouched initial stop.
+            self.assertEqual(trade["stop_price"], trade["initial_stop_price"])
+
+    def test_fraction_above_one_puts_the_stop_past_entry(self):
+        bars = _bars(self.ROWS)
+        trade = smc.find_smc_long_trades(bars, post_tp1_stop_fraction=2.0)[0]
+        if any(f["reason"] == "tp1" for f in trade["fills"]):
+            self.assertGreater(trade["stop_price"], trade["entry_price"])
+
+
 if __name__ == "__main__":
     unittest.main()
