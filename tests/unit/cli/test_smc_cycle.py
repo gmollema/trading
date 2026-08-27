@@ -179,6 +179,56 @@ class TestTp1Touched(unittest.TestCase):
         self.assertTrue(smc_cycle._tp1_touched(bars, 1, 183.32))
 
 
+class TestTp1TouchDetail(unittest.TestCase):
+    """The touch detail feeds the execution-quality record: which bar armed
+    TP1, how high it printed, and how many bars ago that was."""
+
+    def test_returns_first_touching_bar_not_the_highest(self):
+        bars = _ohlc_bars([180.0, 183.5, 190.0, 182.0])
+        self.assertEqual(smc_cycle._tp1_touch_detail(bars, 1, 183.32), (1, 183.5))
+
+    def test_returns_none_when_never_touched(self):
+        bars = _ohlc_bars([180.0, 182.0, 182.96])
+        self.assertIsNone(smc_cycle._tp1_touch_detail(bars, 1, 183.32))
+
+    def test_pre_entry_touch_is_ignored(self):
+        """KLAC 2026-08-25 again: 185.99 printed pre-entry must not arm TP1
+        or be reported as the trigger bar."""
+        bars = _ohlc_bars([185.99, 184.85, 182.86, 182.96])
+        self.assertIsNone(smc_cycle._tp1_touch_detail(bars, 2, 183.32))
+
+    def test_index_is_absolute_not_relative_to_entry(self):
+        bars = _ohlc_bars([180.0, 180.0, 180.0, 183.4, 182.0])
+        self.assertEqual(smc_cycle._tp1_touch_detail(bars, 2, 183.32), (3, 183.4))
+
+    def test_staleness_is_derivable_from_the_index(self):
+        """bars_since_touch in the log event is (len-1) - touch_idx: the
+        touch can be several cycles old before a fetch reveals it."""
+        bars = _ohlc_bars([180.0, 183.4, 182.0, 181.0, 181.5])
+        touch_idx, _ = smc_cycle._tp1_touch_detail(bars, 0, 183.32)
+        self.assertEqual(touch_idx, 1)
+        self.assertEqual((len(bars) - 1) - touch_idx, 3)
+
+    def test_touched_wrapper_agrees_with_detail(self):
+        for highs, entry_idx, target in (
+            ([180.0, 183.5], 1, 183.32),
+            ([180.0, 182.0], 1, 183.32),
+            ([185.99, 182.0], 1, 183.32),
+        ):
+            bars = _ohlc_bars(highs)
+            self.assertEqual(
+                smc_cycle._tp1_touched(bars, entry_idx, target),
+                smc_cycle._tp1_touch_detail(bars, entry_idx, target) is not None,
+            )
+
+    def test_slippage_bps_formula_matches_the_klac_arithmetic(self):
+        """The number the record exists to collect: positive means the fill
+        came back BELOW the level."""
+        level, fill = 183.32, 182.43
+        self.assertEqual(round((level - fill) / level * 10_000, 1), 48.5)
+        self.assertEqual(round((level - level) / level * 10_000, 1), 0.0)
+
+
 class TestLastBarClose(unittest.TestCase):
     """The force-close / new-high fill-price fallback reads a real traded
     price, not get_current_price's delayed quote."""

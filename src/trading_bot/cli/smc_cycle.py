@@ -375,9 +375,9 @@ def _entry_bar_index(today_bars, entry_bar_iso: str) -> int | None:
     return None
 
 
-def _tp1_touched(today_bars, entry_idx: int, tp1_price: float) -> bool:
-    """True once any bar at or after the entry bar has traded through
-    tp1_price.
+def _tp1_touch_detail(today_bars, entry_idx: int, tp1_price: float):
+    """(bar_index, bar_high) of the FIRST bar at or after entry that traded
+    through tp1_price, or None if none has.
 
     Reads bar highs, matching the backtest, instead of polling a quote:
     IBKRClient requests delayed data (MARKET_DATA_TYPE = 3, ~15-20 min
@@ -386,9 +386,27 @@ def _tp1_touched(today_bars, entry_idx: int, tp1_price: float) -> bool:
     already gone. KLAC on 2026-08-25 triggered at 10:12 ET off a ~09:55
     quote near $184 against a $183.32 target, while the stock never
     traded above $182.96 after entry. A bar high is a fact, so the worst
-    case here is a late trigger rather than a false one."""
-    highs = today_bars["High"].astype(float).iloc[entry_idx:]
-    return not highs.empty and float(highs.max()) >= tp1_price
+    case here is a late trigger rather than a false one.
+
+    That late trigger is exactly what this returns the index for. The
+    touch is discovered from bar data up to a full cycle after it
+    happened, and the sell that follows is a market order, so the fill
+    can be well below tp1_price through latency alone. Reporting WHICH
+    bar triggered lets manage_position record how stale the signal was
+    next to what the fill actually came back at -- there is otherwise no
+    live measurement of TP1 execution quality at all, and the backtest
+    assumes it fills exactly at the level."""
+    highs = today_bars["High"].astype(float)
+    for offset, high in enumerate(highs.iloc[entry_idx:]):
+        if float(high) >= tp1_price:
+            return entry_idx + offset, float(high)
+    return None
+
+
+def _tp1_touched(today_bars, entry_idx: int, tp1_price: float) -> bool:
+    """True once any bar at or after the entry bar has traded through
+    tp1_price. See _tp1_touch_detail, which this wraps."""
+    return _tp1_touch_detail(today_bars, entry_idx, tp1_price) is not None
 
 
 def manage_position(ib, pos: dict, rules: dict) -> dict | None:
@@ -416,7 +434,11 @@ def manage_position(ib, pos: dict, rules: dict) -> dict | None:
 
     # --- TP1: sell a fraction, move the stop to breakeven ---
     if not pos.get("tp1_done") and pos.get("tp1_price") is not None:
-        if today_bars is not None and _tp1_touched(today_bars, entry_idx, pos["tp1_price"]):
+        touch = _tp1_touch_detail(today_bars, entry_idx, pos["tp1_price"]) if today_bars is not None else None
+        if touch is not None:
+            touch_idx, touch_high = touch
+            # How stale the signal was by the time this cycle acted on it.
+            bars_since_touch = (len(today_bars) - 1) - touch_idx
             if not _cancel_stop(ib, pos.get("stop_order_id")):
                 log_event({"event": "tp1_skipped", "symbol": symbol, "reason": "old stop cancel unconfirmed"})
                 return pos
@@ -447,7 +469,22 @@ def manage_position(ib, pos: dict, rules: dict) -> dict | None:
             pos["stop_order_id"] = _place_stop(ib, symbol, pos["qty"], new_stop)
             pos["current_stop_price"] = new_stop
             pos["tp1_done"] = True
-            log_event({"event": "tp1_done", "symbol": symbol, "sold": max(partial_qty, 0), "new_stop": new_stop})
+            # Execution-quality record: the backtest fills TP1 at exactly
+            # tp1_price, so slippage_bps here is the live-vs-backtest gap
+            # for this leg, and bars_since_touch is how much of it latency
+            # could explain. Nothing reads these yet -- they exist so the
+            # distribution can be measured instead of assumed.
+            event = {
+                "event": "tp1_done", "symbol": symbol, "sold": max(partial_qty, 0),
+                "new_stop": new_stop, "tp1_level": pos["tp1_price"],
+                "trigger_bar_high": touch_high,
+                "trigger_bar_iso": str(today_bars.index[touch_idx]),
+                "bars_since_touch": bars_since_touch,
+            }
+            if partial_qty >= 1:
+                event["fill_price"] = fill_price
+                event["slippage_bps"] = round((pos["tp1_price"] - fill_price) / pos["tp1_price"] * 10_000, 1)
+            log_event(event)
             return pos
 
     # --- Full exit on the first confirmed post-entry swing high ---
