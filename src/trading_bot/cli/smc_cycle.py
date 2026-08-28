@@ -22,14 +22,9 @@ How it maps onto the backtest-validated configuration
     one source of truth, no live-vs-backtest reimplementation drift.
 
 Known live-vs-backtest deviations (accepted for paper validation):
-  - Entries and TP1 partials rest as LIMIT orders at the level the signal
-    names, matching what the backtest assumes it fills at. They previously
-    crossed the spread as market orders, which measured 48.5 and 79.4 bps
-    adverse on TP1 against a median stop distance of just 17.3 bps. The
-    deviation is now the opposite one: a limit can fail to fill, and it
-    fails precisely when price turns around off the level, so the backtest
-    (which models neither slippage nor missed fills) still does not
-    describe live execution. Track entry_not_filled / tp1_not_filled.
+  - Entries fill at market after the OB retest prints, not at the exact
+    OB-high limit the backtest assumes -- live fills measure real
+    slippage, which the backtest never modeled.
   - The entry window is 10:05-15:30 ET (matching the existing bot's
     cadence); the backtest entered from the open.
   - yfinance 5-min data can lag or drop bars; symbols with stale data
@@ -66,26 +61,6 @@ STOP_CONFIRM_TIMEOUT_SECS = 5
 # between that close and the live book.
 STOP_BELOW_MARKET_BUFFER_BPS = 10
 ORDER_FILL_TIMEOUT_SECS = 10
-
-# Entries and TP1 partials rest as limit orders at the level the signal
-# names, rather than crossing the spread with a market order. Measured on
-# live fills, the market-order legs gave up 48.5 and 79.4 bps on TP1 while
-# the resting StopOrder leg gave up 0-5.9 -- against a median stop distance
-# of 17.3 bps, so one leg's slippage exceeded the whole risk distance of
-# the median trade. A limit at the level is also what the backtest already
-# assumes it fills at.
-#
-# The trade-off is fills, not cost: a limit only fills if price comes back
-# to it, so it misses exactly the setups that turn straight around off the
-# level. The backtest models neither slippage nor missed fills, so it
-# cannot say which way that nets out -- only live fill rates can.
-LIMIT_FILL_TIMEOUT_SECS = 20
-
-# How far THROUGH the level to price the limit, in bps: 0.0 sits exactly
-# at it (backtest semantics, cheapest fill, lowest fill rate). Raising it
-# buys fill probability with a bounded amount of slippage -- bounded being
-# the point, unlike a market order.
-LIMIT_THROUGH_BPS = 0.0
 BAR_STALENESS_LIMIT_MINUTES = 20
 
 
@@ -119,7 +94,7 @@ if __name__ == "__main__":
 # --------------------------------------------------------------------------
 import yfinance as yf  # noqa: E402
 from dotenv import load_dotenv  # noqa: E402
-from ib_async import LimitOrder, MarketOrder, Stock, StopOrder  # noqa: E402
+from ib_async import MarketOrder, Stock, StopOrder  # noqa: E402
 
 from trading_bot import smc_live  # noqa: E402
 from trading_bot.backtest.smc_signals import confirmed_new_high_exit, latest_entry_signal  # noqa: E402
@@ -337,55 +312,6 @@ def _market_order(ib, symbol: str, side: str, qty: int):
         if trade.orderStatus.status in SETTLED_ORDER_STATUSES:
             break
     return trade
-
-
-def limit_price_for(level: float, side: str, through_bps: float = LIMIT_THROUGH_BPS) -> float:
-    """Price a limit at `level`, optionally `through_bps` beyond it.
-
-    Through means toward the side that fills: a buy limit goes higher, a
-    sell limit lower. At 0.0 this is just the level rounded to a cent.
-    """
-    factor = 1.0 + through_bps / 10_000.0 if side == "BUY" else 1.0 - through_bps / 10_000.0
-    return round(float(level) * factor, 2)
-
-
-def _limit_order(ib, symbol: str, side: str, qty: int, level: float,
-                 timeout_secs: int = LIMIT_FILL_TIMEOUT_SECS):
-    """Place a limit at `level`, wait, then CANCEL whatever did not fill.
-
-    Returns (trade, filled_qty, avg_fill_price); filled_qty 0 means the
-    price never came back and no shares changed hands.
-
-    Cancelling the remainder is the whole safety story here. A market
-    order is over the moment it settles, but an unfilled limit rests on
-    IBKR's book and can fill minutes later, between cycles, creating or
-    shrinking a position no state file knows about -- and every stop this
-    module places is sized against that state. So the unfilled remainder
-    is always cancelled before returning, and the filled quantity is
-    re-read afterwards in case a fill landed during the cancel.
-    """
-    contract = _qualify(ib, symbol)
-    order = LimitOrder(side, qty, limit_price_for(level, side))
-    order.outsideRth = True
-    trade = ib.placeOrder(contract, order)
-
-    deadline = time.time() + timeout_secs
-    while time.time() < deadline:
-        ib.sleep(0.25)
-        if trade.orderStatus.status in SETTLED_ORDER_STATUSES:
-            break
-
-    filled = int(float(trade.orderStatus.filled or 0))
-    if filled < qty and trade.orderStatus.status not in SETTLED_ORDER_STATUSES:
-        try:
-            ib.cancelOrder(trade.order)
-            ib.sleep(0.5)
-        except Exception as e:
-            log_event({"event": "limit_cancel_failed", "symbol": symbol,
-                       "side": side, "qty": qty, "error": str(e)})
-        filled = int(float(trade.orderStatus.filled or 0))
-
-    return trade, filled, float(trade.orderStatus.avgFillPrice or 0.0)
 
 
 def get_current_price(ib, symbol: str) -> float | None:
@@ -608,27 +534,13 @@ def manage_position(ib, pos: dict, rules: dict) -> dict | None:
             partial_qty = min(partial_qty, pos["qty"] - 1)  # always keep a remainder for the runner
 
             if partial_qty >= 1:
-                trade, filled_qty, avg_fill = _limit_order(
-                    ib, symbol, "SELL", partial_qty, pos["tp1_price"]
-                )
+                trade = _market_order(ib, symbol, "SELL", partial_qty)
                 status = trade.orderStatus.status
-                if filled_qty < 1:
-                    # Unlike a missed entry, this leaves a LIVE position whose
-                    # stop was just cancelled. Put the stop back and leave
-                    # tp1_done False so the next cycle retries -- the touch
-                    # that armed this is still true.
-                    log_event({
-                        "event": "tp1_not_filled", "symbol": symbol, "qty": partial_qty,
-                        "limit_price": limit_price_for(pos["tp1_price"], "SELL"),
-                        "status": status,
-                    })
+                if status in FAILED_SELL_STATUSES:
+                    log_event({"event": "tp1_sell_failed", "symbol": symbol, "status": status})
                     pos["stop_order_id"] = _place_stop(ib, symbol, pos["qty"], pos["current_stop_price"])
                     return pos
-                if filled_qty < partial_qty:
-                    log_event({"event": "tp1_partial_fill", "symbol": symbol,
-                               "requested": partial_qty, "filled": filled_qty})
-                    partial_qty = filled_qty
-                fill_price = avg_fill or float(today_bars["Close"].iloc[-1])
+                fill_price = trade.orderStatus.avgFillPrice or float(today_bars["Close"].iloc[-1])
                 append_trade_row(symbol, "SELL", partial_qty, fill_price, trade.order.orderId, status, "tp1")
                 pos["qty"] -= partial_qty
                 partial_pnl = (fill_price - pos["entry_price"]) * partial_qty
@@ -813,30 +725,13 @@ def entry_scan(ib, rules: dict, env: dict, open_positions: list[dict]) -> list[d
             log_event({"event": "entry_skipped", "symbol": ticker, "reason": "size < 1"})
             continue
 
-        # A missed entry costs nothing -- no position, no stop, nothing to
-        # unwind -- so the limit's downside here is purely the trades it
-        # declines to take, and those are skewed: price that turns straight
-        # around off the order block never comes back to fill us. Watch the
-        # entry_not_filled rate against entry_slippage_bps before deciding
-        # this was an improvement.
-        trade, filled_qty, avg_fill = _limit_order(ib, ticker, "BUY", size, signal["entry_price"])
+        trade = _market_order(ib, ticker, "BUY", size)
         status = trade.orderStatus.status
-        if filled_qty < 1:
-            log_event({
-                "event": "entry_not_filled", "symbol": ticker, "qty": size,
-                "limit_price": limit_price_for(signal["entry_price"], "BUY"),
-                "status": status,
-            })
+        if status in FAILED_SELL_STATUSES:
+            log_event({"event": "entry_failed", "symbol": ticker, "status": status})
             continue
 
-        # A partial fill is a real position, just a smaller one -- size the
-        # stop against what actually filled, never against what was asked.
-        if filled_qty < size:
-            log_event({"event": "entry_partial_fill", "symbol": ticker,
-                       "requested": size, "filled": filled_qty})
-            size = filled_qty
-
-        fill_price = avg_fill or signal["entry_price"]
+        fill_price = trade.orderStatus.avgFillPrice or signal["entry_price"]
         append_trade_row(ticker, "BUY", size, fill_price, trade.order.orderId, status, "entry")
         stop_order_id = _place_stop(ib, ticker, size, signal["stop_price"])
 
