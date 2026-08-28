@@ -435,3 +435,56 @@ class TestMarketOrderWaitsForFill(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestAdverseSlippageBps(unittest.TestCase):
+    """Entry slippage was the one execution leg the safety log could not
+    reconstruct after the fact -- entry_opened recorded the fill under the
+    name entry_price and dropped the signal level entirely.
+    """
+
+    def test_buy_filling_above_the_level_is_adverse(self):
+        # 100.00 signal, 100.50 fill -> paid 50 bps more than the backtest
+        # assumes it would.
+        self.assertAlmostEqual(
+            smc_cycle.adverse_slippage_bps(100.0, 100.5, "BUY"), 50.0, places=6
+        )
+
+    def test_buy_filling_below_the_level_is_favourable(self):
+        self.assertAlmostEqual(
+            smc_cycle.adverse_slippage_bps(100.0, 99.5, "BUY"), -50.0, places=6
+        )
+
+    def test_sell_sign_is_inverted(self):
+        # Selling BELOW the level is the adverse direction, so it must come
+        # back positive the same way an over-paid buy does.
+        self.assertAlmostEqual(
+            smc_cycle.adverse_slippage_bps(100.0, 99.5, "SELL"), 50.0, places=6
+        )
+        self.assertAlmostEqual(
+            smc_cycle.adverse_slippage_bps(100.0, 100.5, "SELL"), -50.0, places=6
+        )
+
+    def test_exact_fill_is_zero(self):
+        self.assertEqual(smc_cycle.adverse_slippage_bps(100.0, 100.0, "BUY"), 0.0)
+
+    def test_reproduces_the_measured_live_tp1_slippage(self):
+        # KLAC's real TP1: target 183.32, filled 182.43 -- the 49 bps the
+        # slippage note in smc_signals.py records.
+        self.assertAlmostEqual(
+            smc_cycle.adverse_slippage_bps(183.320007, 182.43, "SELL"), 48.5, places=1
+        )
+
+    def test_non_positive_signal_price_returns_none_rather_than_dividing(self):
+        self.assertIsNone(smc_cycle.adverse_slippage_bps(0.0, 100.0, "BUY"))
+        self.assertIsNone(smc_cycle.adverse_slippage_bps(-1.0, 100.0, "BUY"))
+        self.assertIsNone(smc_cycle.adverse_slippage_bps(None, 100.0, "BUY"))
+
+
+class TestRoundedHelper(unittest.TestCase):
+    def test_rounds_a_number(self):
+        self.assertEqual(smc_cycle._rounded(1.23456), 1.23)
+
+    def test_passes_none_through(self):
+        # An unmeasurable slippage must log as null, not crash the entry.
+        self.assertIsNone(smc_cycle._rounded(None))

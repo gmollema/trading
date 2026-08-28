@@ -155,6 +155,34 @@ def append_trade_row(symbol: str, side: str, size: int, fill_price: float, order
         )
 
 
+def _rounded(value: float | None, places: int = 2) -> float | None:
+    """round() that tolerates None, so an unmeasurable slippage logs as
+    null rather than crashing the entry path."""
+    return None if value is None else round(value, places)
+
+
+def adverse_slippage_bps(signal_price: float, fill_price: float, side: str) -> float | None:
+    """How far a fill landed WORSE than the level the signal triggered on,
+    in basis points. Positive is adverse; negative means a better fill.
+
+    Worth recording per fill because the backtest and this bot execute
+    differently at the same signal: find_smc_long_trades fills at the level
+    itself (entry at the order block's high, TP1 at tp1_price -- limit-order
+    semantics), while entries and non-stop exits here are MarketOrders sent
+    after the level is touched. The stop is the exception, resting at its
+    level as a real StopOrder, and it is the one leg measured near zero.
+
+    That gap is execution cost, and the strategy's own modelled edge is the
+    same order of magnitude (~32 bps mean per trade on a zero-cost basis),
+    so it decides viability rather than trimming it. Returns None when
+    signal_price is non-positive, which would make the ratio meaningless.
+    """
+    if not signal_price or signal_price <= 0:
+        return None
+    delta = (fill_price - signal_price) / signal_price * 10_000.0
+    return delta if side == "BUY" else -delta
+
+
 def count_today_buys() -> int:
     if not smc_live.SMC_TRADES_CSV_PATH.exists():
         return 0
@@ -724,12 +752,22 @@ def entry_scan(ib, rules: dict, env: dict, open_positions: list[dict]) -> list[d
         held_symbols.add(ticker)
         smc_open_count += 1
         today_buy_count += 1
+        # entry_price stays the FILL -- compute_perf.collect_entry_stops reads
+        # it that way. signal_price is the OB high the entry actually
+        # triggered on, which was previously discarded, leaving entry
+        # slippage the one execution leg that could not be measured after
+        # the fact (stop and tp1 levels are both recoverable from this same
+        # event). See adverse_slippage_bps.
         log_event(
             {
                 "event": "entry_opened",
                 "symbol": ticker,
                 "qty": size,
                 "entry_price": float(fill_price),
+                "signal_price": float(signal["entry_price"]),
+                "entry_slippage_bps": _rounded(
+                    adverse_slippage_bps(float(signal["entry_price"]), float(fill_price), "BUY")
+                ),
                 "stop": signal["stop_price"],
                 "tp1": signal["tp1_price"],
             }
