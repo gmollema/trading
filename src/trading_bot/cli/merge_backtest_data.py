@@ -22,9 +22,22 @@ consolidated-tape corrections.
 
 Adjustment-basis guard (the reason this is not a plain concat):
 
-  - Intraday bars come from IBKR whatToShow="TRADES", which is raw and
-    unadjusted. Two fetches agree exactly on overlapping bars apart from
-    a handful of late tape corrections, so they splice cleanly.
+  - Intraday bars come from IBKR whatToShow="TRADES", which is NOT
+    dividend-adjusted -- two fetches agree on overlapping bars apart from
+    late tape corrections and sub-cent rounding, so they normally splice
+    cleanly. They ARE split-adjusted at fetch time, though, and that is
+    not a footnote: a refetch after a split returns the whole series
+    rescaled while the cached copy holds the raw prices that actually
+    traded, putting the two on different bases. Confirmed on the first
+    real use of this script -- MNST split 2:1 on 2026-07-15 and its
+    overlap came back shifted by exactly -50.0000%.
+
+    The cached side is the wrong one to keep. Raw prices carry a
+    fabricated -50% single bar at the split, which a long-only strategy
+    reads as a catastrophic gap and which poisons every order block and
+    swing level derived from it. Rebase the cached head onto the
+    refetch's adjusted scale (prices x ratio, volume / ratio) rather than
+    splicing or discarding the head, which is not re-fetchable.
 
   - Daily bars come from yfinance with auto_adjust=True, which is back-
     adjusted for splits AND dividends. Every dividend paid between two
