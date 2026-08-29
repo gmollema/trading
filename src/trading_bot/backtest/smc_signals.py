@@ -42,6 +42,13 @@ precise algorithm -- these choices are documented here, not hidden):
 
 from __future__ import annotations
 
+# The bar size this whole strategy is specified on. Lives here because
+# both the live cycle and the backtest engine reason in these units --
+# smc_cycle to tell a closed bar from a forming one, smc_engine to work
+# out when the bot could act on a bar -- and two copies of it would be two
+# things to get wrong.
+BAR_INTERVAL_MINUTES = 5
+
 OB_SEARCH_LOOKBACK = 10
 DEFAULT_TIME_WINDOW_BARS = 33
 DEFAULT_TP1_FRACTION = 0.25

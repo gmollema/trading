@@ -62,7 +62,6 @@ STOP_CONFIRM_TIMEOUT_SECS = 5
 STOP_BELOW_MARKET_BUFFER_BPS = 10
 ORDER_FILL_TIMEOUT_SECS = 10
 BAR_STALENESS_LIMIT_MINUTES = 20
-BAR_INTERVAL_MINUTES = 5
 
 
 # --------------------------------------------------------------------------
@@ -98,7 +97,11 @@ from dotenv import load_dotenv  # noqa: E402
 from ib_async import MarketOrder, Stock, StopOrder  # noqa: E402
 
 from trading_bot import smc_live  # noqa: E402
-from trading_bot.backtest.smc_signals import confirmed_new_high_exit, latest_entry_signal  # noqa: E402
+from trading_bot.backtest.smc_signals import (  # noqa: E402
+    BAR_INTERVAL_MINUTES,
+    confirmed_new_high_exit,
+    latest_entry_signal,
+)
 from trading_bot.broker.ibkr_client import IBKRClient  # noqa: E402
 from trading_bot.util.heartbeat import write_heartbeat  # noqa: E402
 from trading_bot.util.notifier import notify  # noqa: E402

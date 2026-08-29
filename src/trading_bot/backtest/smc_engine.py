@@ -22,6 +22,7 @@ import pandas as pd
 from trading_bot.backtest import portfolio
 from trading_bot.backtest.data import DAILY_DIR, INTRADAY_DIR, compute_daily_context, load_daily, load_intraday
 from trading_bot.backtest.smc_signals import (
+    BAR_INTERVAL_MINUTES,
     DEFAULT_ENTRY_FILL,
     DEFAULT_EXIT_FILL,
     DEFAULT_POST_TP1_STOP_FRACTION,
@@ -130,16 +131,40 @@ def watchlist_from_rules(tickers: list[str], daily_dir: Path, rules: dict) -> di
     )
 
 
-def entry_window_mask(dates, earliest_et: str | None, latest_et: str | None) -> list[bool]:
+# How long after a signal bar OPENS the live bot is in a position to act
+# on it: 5 minutes for the bar to close, since smc_cycle evaluates closed
+# bars only, plus the 2-minute stagger HT_SMC_Cycle runs on to keep its
+# data burst off HT_Cycle's (see cli/setup_schedule.py).
+CYCLE_STAGGER_MINUTES = 2
+DEFAULT_ACTION_DELAY_MINUTES = BAR_INTERVAL_MINUTES + CYCLE_STAGGER_MINUTES
+
+
+def entry_window_mask(
+    dates,
+    earliest_et: str | None,
+    latest_et: str | None,
+    action_delay_minutes: int = DEFAULT_ACTION_DELAY_MINUTES,
+) -> list[bool]:
     """Per-bar mask for smc_signals' entry_allowed, from ET wall-clock
     bounds (smc_rules.json time_filter). Bounds are inclusive, matching
     smc_live.get_market_status' reading of the same two keys.
+
+    The bounds are tested against when the bot could ACT on a bar, not
+    when that bar opened, and the difference is a bar at each end. A
+    signal on the bar opening at 10:00 is invisible until it closes at
+    10:05 and is acted on by the 10:07 cycle -- so with earliest 10:05
+    that bar qualifies and one opening at 09:55 does not. At the other
+    end, a bar opening at 15:25 would be acted on at 15:32, past a 15:30
+    cutoff, even though the bar itself opened inside the window. Gating on
+    the open would take entries the live bot refuses and skip one it
+    takes, which for a window this consequential is not a rounding error.
 
     `dates` is the intraday frame's tz-aware date column; the comparison
     is vectorized here because doing it per bar inside the signal loop is
     a tz conversion per bar per ticker.
     """
-    times = dates.dt.tz_convert(ET_TZ).dt.strftime("%H:%M")
+    acted = dates.dt.tz_convert(ET_TZ) + pd.Timedelta(minutes=action_delay_minutes)
+    times = acted.dt.strftime("%H:%M")
     mask = pd.Series(True, index=times.index)
     if earliest_et:
         mask &= times >= earliest_et
@@ -215,6 +240,14 @@ def build_smc_candidates(
         15:45, times the live cycle does not even scan at.
     """
     candidates = []  # (entry_date, symbol, trade_dict)
+    if daily_watchlist is not None:
+        # A ticker that never appears on any date's list cannot produce a
+        # surviving candidate, so scanning it is pure waste -- and with a
+        # 40-name cap over a year that is most of the index (105 of 503 on
+        # the current cache). Exact, not an approximation: the filter below
+        # would drop every one of their trades anyway.
+        ever_listed = set().union(*daily_watchlist.values()) if daily_watchlist else set()
+        tickers = [t for t in tickers if t in ever_listed]
     for ticker in tickers:
         df = load_intraday(ticker, intraday_dir)
         if df is None or df.empty:

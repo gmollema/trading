@@ -9,6 +9,7 @@ max_concurrent_positions cap.
 
 import tempfile
 import unittest
+from datetime import timedelta
 from pathlib import Path
 
 import pandas as pd
@@ -303,21 +304,36 @@ class TestDailyWatchlistByDate(unittest.TestCase):
 
 
 class TestEntryWindowMask(unittest.TestCase):
+    """Bar timestamps are bar OPENS; the bot acts 7 minutes later (5 for
+    the bar to close, 2 for the cycle stagger), and the window is checked
+    against that."""
+
     def _dates(self, times: list[str]):
         return pd.Series(pd.to_datetime([f"2024-01-02 {t}:00-05:00" for t in times], utc=True))
 
-    def test_bounds_are_inclusive(self):
-        dates = self._dates(["09:35", "10:05", "12:00", "15:30", "15:45"])
-        self.assertEqual(
-            entry_window_mask(dates, "10:05", "15:30"),
-            [False, True, True, True, False],
-        )
+    def test_the_bar_acted_on_at_the_open_bound_qualifies(self):
+        """10:00 closes at 10:05 and is acted on at 10:07 -- in. 09:55
+        closes at 10:00 and is acted on at 10:02 -- out."""
+        dates = self._dates(["09:55", "10:00", "10:05"])
+        self.assertEqual(entry_window_mask(dates, "10:05", None), [False, True, True])
+
+    def test_a_bar_the_bot_could_not_act_on_in_time_is_excluded(self):
+        """15:25 opens inside a 15:30 cutoff but is not acted on until
+        15:32. Gating on the open would take an entry the bot refuses."""
+        dates = self._dates(["15:20", "15:25"])
+        self.assertEqual(entry_window_mask(dates, None, "15:30"), [True, False])
 
     def test_open_ended_bounds(self):
         dates = self._dates(["09:35", "12:00", "15:45"])
         self.assertEqual(entry_window_mask(dates, None, "15:30"), [True, True, False])
         self.assertEqual(entry_window_mask(dates, "10:05", None), [False, True, True])
         self.assertEqual(entry_window_mask(dates, None, None), [True, True, True])
+
+    def test_the_delay_is_adjustable(self):
+        """So a rescheduled cycle can be modelled without editing this."""
+        dates = self._dates(["10:00"])
+        self.assertEqual(entry_window_mask(dates, "10:05", None, action_delay_minutes=0), [False])
+        self.assertEqual(entry_window_mask(dates, "10:05", None, action_delay_minutes=7), [True])
 
     def test_compares_in_et_not_utc(self):
         """Cached bars are stored in UTC; 14:00 UTC is 09:00 ET, before
@@ -355,3 +371,17 @@ class TestBuildCandidatesUniverse(unittest.TestCase):
 
     def test_a_date_missing_from_the_watchlist_trades_nothing(self):
         self.assertEqual(self._candidates(daily_watchlist={}), [])
+
+    def test_a_never_listed_ticker_is_skipped_without_being_scanned(self):
+        """The skip is an optimisation, so it has to agree exactly with
+        the filter it is short-cutting."""
+        entry_day = self._candidates()[0][0].date()
+        other_day = entry_day + timedelta(days=1)
+        self.assertEqual(self._candidates(daily_watchlist={other_day: {"BBB"}}), [])
+
+    def test_a_ticker_listed_on_some_other_day_is_still_scanned(self):
+        """Skipping is by the UNION across dates -- a ticker listed on any
+        date must still be evaluated, then gated per entry date."""
+        entry_day = self._candidates()[0][0].date()
+        watchlist = {entry_day: {"AAA"}, entry_day + timedelta(days=1): set()}
+        self.assertEqual(len(self._candidates(daily_watchlist=watchlist)), 1)
