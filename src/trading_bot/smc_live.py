@@ -23,6 +23,7 @@ from pathlib import Path
 import pandas as pd
 
 from trading_bot.backtest import portfolio
+from trading_bot.util.market_hours import MARKET_CLOSE_ET, MARKET_OPEN_ET
 from trading_bot.backtest.smc_signals import (
     DEFAULT_ENTRY_FILL,
     DEFAULT_EXIT_FILL,
@@ -99,7 +100,20 @@ def get_market_status(now_et: datetime, rules: dict) -> str:
     manage_only / force_close / ok), but with the window boundaries taken
     from smc_rules.json's time_filter instead of hardcoded -- duplicated
     rather than imported because cycle.py sys.exit()s at import time
-    outside market hours."""
+    outside market hours.
+
+    The only hardcoded bounds are the session's own (util.market_hours).
+    They used to include a 10:00 floor that sat ABOVE earliest_entry_et
+    and silently outranked it: setting earliest_entry_et to 09:45 changed
+    nothing, because 09:45 still returned "too_early" and the cycle exited
+    before reading it. Since "too_early" skips position management too,
+    that also left any position surviving a failed force-close unmanaged
+    -- no stop repair, no exit -- for the first half hour of the session.
+
+    An earliest_entry_et before the open is not an error; it just means
+    entries are allowed from the open, since the market bounds the config
+    rather than the other way round.
+    """
     if now_et.weekday() >= 5:
         return "weekend"
 
@@ -109,9 +123,9 @@ def get_market_status(now_et: datetime, rules: dict) -> str:
     force_close = tf["force_close_et"]
 
     hm = now_et.strftime("%H:%M")
-    if hm < "10:00":
+    if hm < MARKET_OPEN_ET:
         return "too_early"
-    if hm > "16:00":
+    if hm > MARKET_CLOSE_ET:
         return "closed"
     if hm < earliest_entry:
         return "manage_only"
@@ -119,7 +133,7 @@ def get_market_status(now_et: datetime, rules: dict) -> str:
         return "ok"
     if hm < force_close:
         return "manage_only"
-    if hm <= "16:00":
+    if hm <= MARKET_CLOSE_ET:
         return "force_close"
     return "closed"  # unreachable, defensive fallback
 

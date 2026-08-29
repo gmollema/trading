@@ -85,6 +85,40 @@ class TestBarsAreFresh(unittest.TestCase):
         self.assertFalse(smc_cycle._bars_are_fresh(bars))
 
 
+class TestFastExitCheck(unittest.TestCase):
+    """The pre-import gate may only know the session, never the strategy's
+    entry window -- exiting here skips position management too."""
+
+    def _at(self, hh, mm, day="2024-01-02"):
+        moment = datetime(*(int(x) for x in day.split("-")), hh, mm, tzinfo=ET)
+        with patch("trading_bot.cli.smc_cycle.datetime") as fake:
+            fake.now.return_value = moment
+            return smc_cycle._fast_exit_check()
+
+    def test_before_the_open_exits(self):
+        self.assertEqual(self._at(9, 29), "too_early")
+
+    def test_from_the_open_it_does_not_exit(self):
+        """The old 10:00 floor made this a full half-hour of nothing."""
+        for hh, mm in ((9, 30), (9, 45), (10, 0)):
+            self.assertIsNone(self._at(hh, mm))
+
+    def test_after_the_close_exits(self):
+        self.assertEqual(self._at(16, 1), "closed")
+
+    def test_weekend_exits(self):
+        self.assertEqual(self._at(11, 0, day="2024-01-06"), "weekend")
+
+    def test_it_agrees_with_get_market_status_on_the_session_bounds(self):
+        """Two gates, one session: if they disagree the cycle either dies
+        early or wakes up with nothing to do."""
+        rules = smc_live.load_smc_rules()
+        for hh, mm in ((9, 29), (9, 30), (16, 0), (16, 1)):
+            naive = datetime(2024, 1, 2, hh, mm)
+            exits_late = smc_live.get_market_status(naive, rules) in ("too_early", "closed")
+            self.assertEqual(self._at(hh, mm) is not None, exits_late, f"{hh}:{mm:02d}")
+
+
 class TestClosedBarsOnly(unittest.TestCase):
     """The entry signal is defined on closed bars; yfinance hands back the
     forming one as the last row."""

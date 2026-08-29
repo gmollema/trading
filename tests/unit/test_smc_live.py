@@ -31,7 +31,8 @@ class TestGetMarketStatus(unittest.TestCase):
         self.assertEqual(smc_live.get_market_status(_dt(11, 0, "2024-01-06"), RULES), "weekend")
 
     def test_windows(self):
-        self.assertEqual(smc_live.get_market_status(_dt(9, 59), RULES), "too_early")
+        self.assertEqual(smc_live.get_market_status(_dt(9, 29), RULES), "too_early")
+        self.assertEqual(smc_live.get_market_status(_dt(9, 59), RULES), "manage_only")
         self.assertEqual(smc_live.get_market_status(_dt(10, 2), RULES), "manage_only")
         self.assertEqual(smc_live.get_market_status(_dt(10, 5), RULES), "ok")
         self.assertEqual(smc_live.get_market_status(_dt(15, 29), RULES), "ok")
@@ -39,6 +40,30 @@ class TestGetMarketStatus(unittest.TestCase):
         self.assertEqual(smc_live.get_market_status(_dt(15, 51), RULES), "force_close")
         self.assertEqual(smc_live.get_market_status(_dt(16, 0), RULES), "force_close")
         self.assertEqual(smc_live.get_market_status(_dt(16, 1), RULES), "closed")
+
+    def test_earliest_entry_et_actually_governs_the_entry_window(self):
+        """The regression this replaces: a hardcoded 10:00 floor sat ABOVE
+        earliest_entry_et and returned "too_early" first, so lowering the
+        config value changed nothing at all."""
+        early = {**RULES, "time_filter": {**RULES["time_filter"], "earliest_entry_et": "09:45"}}
+        self.assertEqual(smc_live.get_market_status(_dt(9, 44), early), "manage_only")
+        self.assertEqual(smc_live.get_market_status(_dt(9, 45), early), "ok")
+        self.assertEqual(smc_live.get_market_status(_dt(9, 59), early), "ok")
+
+    def test_the_session_open_still_bounds_it(self):
+        """An earliest_entry_et before the open is not an error -- it just
+        means entries start at the open. The market bounds the config, not
+        the other way round."""
+        pre_open = {**RULES, "time_filter": {**RULES["time_filter"], "earliest_entry_et": "08:00"}}
+        self.assertEqual(smc_live.get_market_status(_dt(8, 30), pre_open), "too_early")
+        self.assertEqual(smc_live.get_market_status(_dt(9, 30), pre_open), "ok")
+
+    def test_positions_are_managed_from_the_open(self):
+        """"too_early" exits the whole cycle, management included. With the
+        floor at 10:00, a position surviving a failed force-close sat
+        unmanaged -- no stop repair, no exit -- for the first half hour."""
+        for hh, mm in ((9, 30), (9, 45), (10, 0)):
+            self.assertNotEqual(smc_live.get_market_status(_dt(hh, mm), RULES), "too_early")
 
 
 class TestReadWatchlist(unittest.TestCase):

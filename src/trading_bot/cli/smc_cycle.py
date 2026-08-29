@@ -67,16 +67,28 @@ BAR_STALENESS_LIMIT_MINUTES = 20
 # --------------------------------------------------------------------------
 # Fast time gate (pure stdlib) -- same pattern as cycle.py: exit in well
 # under a second outside market hours, before any heavy imports.
+# util.market_hours is deliberately dependency-free so it can be imported
+# here without dragging pandas in behind it.
 # --------------------------------------------------------------------------
+from trading_bot.util.market_hours import MARKET_CLOSE_ET, MARKET_OPEN_ET  # noqa: E402
+
 
 def _fast_exit_check() -> str | None:
+    """Session bounds only, never the strategy's entry window.
+
+    This runs before the heavy imports, so it cannot read smc_rules.json's
+    time_filter without defeating its own purpose -- and it should not
+    want to. Exiting here on an entry-window bound would skip position
+    management as well, which is what the old 10:00 floor did. Anything
+    narrower than the session is get_market_status' job, after the imports.
+    """
     now_et = datetime.now(ET)
     if now_et.weekday() >= 5:
         return "weekend"
     hm = now_et.strftime("%H:%M")
-    if hm < "10:00":
+    if hm < MARKET_OPEN_ET:
         return "too_early"
-    if hm > "16:00":
+    if hm > MARKET_CLOSE_ET:
         return "closed"
     return None
 
