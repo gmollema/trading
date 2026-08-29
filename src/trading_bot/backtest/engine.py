@@ -231,7 +231,10 @@ def run_backtest(
     current_day = None
 
     for timestamp, tick_rows in universe.groupby("date", sort=True):
-        status = get_market_status(timestamp)
+        # Same gate the live bot uses, now reading the same rules file --
+        # the entry window was hardcoded in it until 2026-08-29, so this
+        # backtest silently ignored rules.json's time_filter too.
+        status = get_market_status(timestamp, rules)
         trading_date = timestamp.date()
 
         if trading_date != current_day:

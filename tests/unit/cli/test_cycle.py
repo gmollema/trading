@@ -51,44 +51,123 @@ def et(date: tuple[int, int, int], hour: int, minute: int) -> datetime:
 
 
 class TestGetMarketStatus(unittest.TestCase):
-    """get_market_status: weekday/time-of-day -> status, boundary-exact."""
+    """get_market_status: weekday/time-of-day -> status, boundary-exact.
+
+    Boundaries come from rules.json's time_filter now, so these pass one
+    in explicitly rather than asserting against values baked into the
+    function. RULES matches the shipped file, which is why every boundary
+    below is unchanged from when they were hardcoded -- the config always
+    stated the same times it was being ignored in favour of.
+    """
+
+    RULES = {"time_filter": {"earliest_entry_et": "10:05", "latest_entry_et": "15:30",
+                             "force_close_et": "15:51"}}
+
+    def _status(self, day, hh, mm, rules=None):
+        return cycle.get_market_status(et(day, hh, mm), rules or self.RULES)
 
     def test_saturday_is_weekend(self):
-        self.assertEqual(cycle.get_market_status(et(SATURDAY, 12, 0)), "weekend")
+        self.assertEqual(self._status(SATURDAY, 12, 0), "weekend")
 
     def test_sunday_is_weekend(self):
-        self.assertEqual(cycle.get_market_status(et(SUNDAY, 12, 0)), "weekend")
+        self.assertEqual(self._status(SUNDAY, 12, 0), "weekend")
 
-    def test_before_10am_is_too_early(self):
-        self.assertEqual(cycle.get_market_status(et(MONDAY, 9, 59)), "too_early")
+    def test_before_the_open_is_too_early(self):
+        self.assertEqual(self._status(MONDAY, 9, 29), "too_early")
+
+    def test_from_the_open_positions_are_managed(self):
+        """Was "too_early" until 10:00, which exits the whole cycle -- so a
+        position surviving a failed force-close went unmanaged through the
+        first half hour."""
+        self.assertEqual(self._status(MONDAY, 9, 30), "manage_only")
+        self.assertEqual(self._status(MONDAY, 9, 59), "manage_only")
 
     def test_10am_exactly_is_manage_only(self):
-        self.assertEqual(cycle.get_market_status(et(MONDAY, 10, 0)), "manage_only")
+        self.assertEqual(self._status(MONDAY, 10, 0), "manage_only")
 
     def test_1004_is_manage_only(self):
-        self.assertEqual(cycle.get_market_status(et(MONDAY, 10, 4)), "manage_only")
+        self.assertEqual(self._status(MONDAY, 10, 4), "manage_only")
 
     def test_1005_exactly_is_ok(self):
-        self.assertEqual(cycle.get_market_status(et(MONDAY, 10, 5)), "ok")
+        self.assertEqual(self._status(MONDAY, 10, 5), "ok")
 
     def test_1529_is_ok(self):
-        self.assertEqual(cycle.get_market_status(et(MONDAY, 15, 29)), "ok")
+        self.assertEqual(self._status(MONDAY, 15, 29), "ok")
 
     def test_1530_exactly_is_manage_only(self):
         """Entry window closes at 15:30 -- that minute itself is manage_only, not ok."""
-        self.assertEqual(cycle.get_market_status(et(MONDAY, 15, 30)), "manage_only")
+        self.assertEqual(self._status(MONDAY, 15, 30), "manage_only")
 
     def test_1550_is_manage_only(self):
-        self.assertEqual(cycle.get_market_status(et(MONDAY, 15, 50)), "manage_only")
+        self.assertEqual(self._status(MONDAY, 15, 50), "manage_only")
 
     def test_1551_exactly_is_force_close(self):
-        self.assertEqual(cycle.get_market_status(et(MONDAY, 15, 51)), "force_close")
+        self.assertEqual(self._status(MONDAY, 15, 51), "force_close")
 
     def test_1600_exactly_is_force_close(self):
-        self.assertEqual(cycle.get_market_status(et(MONDAY, 16, 0)), "force_close")
+        self.assertEqual(self._status(MONDAY, 16, 0), "force_close")
 
     def test_1601_is_closed(self):
-        self.assertEqual(cycle.get_market_status(et(MONDAY, 16, 1)), "closed")
+        self.assertEqual(self._status(MONDAY, 16, 1), "closed")
+
+    def test_the_config_actually_moves_the_boundaries(self):
+        """The regression this replaces: all four times were hardcoded, so
+        rules.json's time_filter read as authoritative while changing it
+        did nothing whatsoever."""
+        shifted = {"time_filter": {"earliest_entry_et": "09:45", "latest_entry_et": "14:00",
+                                   "force_close_et": "15:00"}}
+        self.assertEqual(self._status(MONDAY, 9, 45, shifted), "ok")
+        self.assertEqual(self._status(MONDAY, 13, 59, shifted), "ok")
+        self.assertEqual(self._status(MONDAY, 14, 0, shifted), "manage_only")
+        self.assertEqual(self._status(MONDAY, 15, 0, shifted), "force_close")
+
+    def test_the_session_still_bounds_the_config(self):
+        """An entry window opening before the bell means "from the bell"."""
+        early = {"time_filter": {"earliest_entry_et": "08:00", "latest_entry_et": "15:30",
+                                 "force_close_et": "15:51"}}
+        self.assertEqual(self._status(MONDAY, 9, 0, early), "too_early")
+        self.assertEqual(self._status(MONDAY, 9, 30, early), "ok")
+
+    def test_it_matches_the_shipped_rules_file(self):
+        """The values under test are the ones actually in use."""
+        shipped = json.loads(Path("rules.json").read_text())
+        for hh, mm in ((9, 29), (9, 30), (10, 5), (15, 30), (15, 51), (16, 1)):
+            self.assertEqual(
+                cycle.get_market_status(et(MONDAY, hh, mm), shipped),
+                self._status(MONDAY, hh, mm),
+                f"{hh}:{mm:02d}",
+            )
+
+
+class TestFastExitCheck(unittest.TestCase):
+    """The pre-import gate may only know the session, never the entry
+    window -- exiting here skips position management too."""
+
+    def _at(self, day, hh, mm):
+        with patch("trading_bot.cli.cycle.datetime") as fake:
+            fake.now.return_value = et(day, hh, mm)
+            return cycle._fast_exit_check()
+
+    def test_before_the_open_exits(self):
+        self.assertEqual(self._at(MONDAY, 9, 29), "too_early")
+
+    def test_from_the_open_it_does_not_exit(self):
+        for hh, mm in ((9, 30), (9, 45), (10, 0)):
+            self.assertIsNone(self._at(MONDAY, hh, mm))
+
+    def test_after_the_close_exits(self):
+        self.assertEqual(self._at(MONDAY, 16, 1), "closed")
+
+    def test_weekend_exits(self):
+        self.assertEqual(self._at(SATURDAY, 12, 0), "weekend")
+
+    def test_it_agrees_with_get_market_status_on_the_session_bounds(self):
+        """Two gates, one session: disagreement means the cycle either
+        dies early or wakes up with nothing to do."""
+        shipped = json.loads(Path("rules.json").read_text())
+        for hh, mm in ((9, 29), (9, 30), (16, 0), (16, 1)):
+            exits_late = cycle.get_market_status(et(MONDAY, hh, mm), shipped) in ("too_early", "closed")
+            self.assertEqual(self._at(MONDAY, hh, mm) is not None, exits_late, f"{hh}:{mm:02d}")
 
 
 class TestCastBools(unittest.TestCase):

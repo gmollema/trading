@@ -49,6 +49,10 @@ CYCLE_ERRORS_LOG = LOGS_DIR / "cycle_errors.log"
 
 ET = ZoneInfo("America/New_York")
 
+# Dependency-free by design, so importing it cannot defeat the fast gate
+# below (see util/market_hours.py).
+from trading_bot.util.market_hours import MARKET_CLOSE_ET, MARKET_OPEN_ET  # noqa: E402
+
 SETTLED_ORDER_STATUSES = {"Filled", "Cancelled", "ApiCancelled", "Inactive", "Rejected"}
 FAILED_SELL_STATUSES = {"Cancelled", "ApiCancelled", "Inactive", "Rejected"}
 SUBPROCESS_TIMEOUT_SECS = 30
@@ -59,34 +63,67 @@ CANCEL_CONFIRM_TIMEOUT_SECS = 5
 # STEP 1: TIME GATE (pure stdlib, cheap - must stay fast)
 # --------------------------------------------------------------------------
 
-def get_market_status(now_et: datetime) -> str:
-    """Returns one of: weekend, too_early, closed, manage_only, force_close, ok."""
+def get_market_status(now_et: datetime, rules: dict) -> str:
+    """Returns one of: weekend, too_early, closed, manage_only, force_close, ok.
+
+    Boundaries come from rules.json's time_filter. They used to be
+    hardcoded here -- all four of them -- which made that whole config
+    block decorative: it happened to state the same values the code used,
+    so it read as authoritative while changing it did nothing at all.
+
+    The only times still fixed in code are the session's own
+    (util.market_hours), because those are a fact about the exchange
+    rather than a choice this strategy makes. An earliest_entry_et before
+    the open therefore means "from the open", not an error.
+
+    The old floor also sat ABOVE earliest_entry_et at 10:00, and
+    "too_early" exits the entire cycle rather than just declining to
+    enter -- so a position that survived a failed force-close went
+    unmanaged, with no stop repair and no exit, through the first half
+    hour of the session.
+    """
     if now_et.weekday() >= 5:  # 5 = Saturday, 6 = Sunday
         return "weekend"
 
+    tf = rules["time_filter"]
+    earliest_entry = tf["earliest_entry_et"]
+    latest_entry = tf["latest_entry_et"]
+    force_close = tf["force_close_et"]
+
     hm = now_et.strftime("%H:%M")
 
-    if hm < "10:00":
+    if hm < MARKET_OPEN_ET:
         return "too_early"
-    if hm > "16:00":
+    if hm > MARKET_CLOSE_ET:
         return "closed"
-    if "10:00" <= hm < "10:05":
+    if hm < earliest_entry:
         return "manage_only"
-    if "10:05" <= hm < "15:30":
+    if hm < latest_entry:
         return "ok"
-    if "15:30" <= hm < "15:51":
+    if hm < force_close:
         return "manage_only"
-    if "15:51" <= hm <= "16:00":
+    if hm <= MARKET_CLOSE_ET:
         return "force_close"
     return "closed"  # unreachable, defensive fallback
 
 
 def _fast_exit_check() -> str | None:
-    """Cheap gate check performed before any heavy imports."""
+    """Session bounds only, checked before any heavy imports.
+
+    Deliberately does NOT consult rules.json's time_filter, and not just
+    because reading it here would be awkward: exiting the process on an
+    entry-window bound would skip position management too. Anything
+    narrower than the session is get_market_status' job, once main() has
+    the rules in hand.
+    """
     now_et = datetime.now(ET)
-    status = get_market_status(now_et)
-    if status in ("weekend", "too_early", "closed"):
-        return status
+    if now_et.weekday() >= 5:
+        return "weekend"
+    hm = now_et.strftime("%H:%M")
+    if hm < MARKET_OPEN_ET:
+        return "too_early"
+    if hm > MARKET_CLOSE_ET:
+        return "closed"
     return None
 
 
@@ -842,8 +879,8 @@ def connect_ibkr(host: str, port: int, client_id: int) -> IBKRClient:
 # --------------------------------------------------------------------------
 
 def main() -> int:
-    now_et = datetime.now(ET)
-    status = get_market_status(now_et)
+    rules = json.loads(RULES_PATH.read_text())
+    status = get_market_status(datetime.now(ET), rules)
 
     # Weekend/too_early/closed already handled by the fast-path gate above
     # this point; status here is one of manage_only / force_close / ok.
@@ -858,8 +895,6 @@ def main() -> int:
         "max_trades_per_day": int(os.environ.get("MAX_TRADES_PER_DAY", "0")),
         "max_risk_per_trade_pct": float(os.environ.get("MAX_RISK_PER_TRADE_PCT", "1.0")),
     }
-
-    rules = json.loads(RULES_PATH.read_text())
 
     try:
         ibkr = connect_ibkr(env["host"], env["port"], env["client_id"])

@@ -18,11 +18,13 @@
     "I3_rvol_lookback_days": 14
   },
   "time_filter": {
+    "_note": "These four times now actually govern the bot. Until 2026-08-29 every one of them was hardcoded in cycle.get_market_status and this block was read by nothing, so it looked authoritative while editing it did nothing at all. The session bounds (09:30-16:00) stay in code, in util/market_hours.py, because those are the exchange's rather than this strategy's; an earliest_entry_et before the open therefore means 'from the open'. backtest/engine.py calls the same gate with the same rules, so the backtest and the live bot share one window.",
     "earliest_entry_et": "10:05",
     "latest_entry_et": "15:30",
     "force_close_et": "15:51"
   },
   "exit": {
+    "_note": "initial_stop_rule and post_breakeven_trail are LABELS, not switches: nothing reads them. They describe what cycle.py implements -- today_lod * 0.99 for the initial stop, compute_swing_lows with a 2/2 pivot for the trail -- and were verified to match on 2026-08-29, but editing either string changes no behaviour. Change the code. The numeric keys below ARE read (see manage_position).",
     "initial_stop_rule": "lod_minus_1pct",
     "partial_profit_trigger_R": 0.75,
     "partial_profit_fraction": 0.3333,

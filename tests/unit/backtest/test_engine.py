@@ -26,6 +26,16 @@ DAILY_HISTORY_LEN = 200  # rows needed for a defined SMA200
 
 def make_rules(max_concurrent_positions=5):
     return {
+        # The engine shares cycle.get_market_status with the live bot, so
+        # it needs the same time_filter the live bot reads. These are the
+        # shipped values; before 2026-08-29 they were hardcoded inside the
+        # gate and this block would not have been needed -- which was the
+        # bug, not the convenience.
+        "time_filter": {
+            "earliest_entry_et": "10:05",
+            "latest_entry_et": "15:30",
+            "force_close_et": "15:51",
+        },
         "daily_filters": {
             "D1_above_prior_day_high": True,
             "D2_prior_close_above_sma200": True,
