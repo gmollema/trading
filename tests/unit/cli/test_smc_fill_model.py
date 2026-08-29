@@ -113,10 +113,14 @@ class ClassifyTradesTest(unittest.TestCase):
             ("2026-01-02 14:30:00+00:00", 100.0, 99.0),    # closes below -> fills
             ("2026-01-02 14:35:00+00:00", 100.0, 101.0),   # closes above -> misses
         ])
+        # signal_price is the level a limit would rest at; entry_price is
+        # what the configured fill spec paid. They coincide under "level".
         trades = [
             {"entry_idx": 0, "entry_date": bars["date"][0], "entry_price": 100.0,
+             "signal_price": 100.0,
              "fills": [{"qty_fraction": 1.0, "price": 101.0, "reason": "tp1"}]},
             {"entry_idx": 1, "entry_date": bars["date"][1], "entry_price": 100.0,
+             "signal_price": 100.0,
              "fills": [{"qty_fraction": 1.0, "price": 99.0, "reason": "stop"}]},
         ]
         out = m.classify_trades(bars, trades, "immediate")

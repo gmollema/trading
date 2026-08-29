@@ -1,21 +1,28 @@
 """Estimate what limit-order entries would and would not have filled.
 
-smc_cycle now rests entries as limit orders at the order block's high
-instead of crossing the spread (commit 5ee5816). That removes a measured
-cost -- the market-order legs gave up 48.5 and 79.4 bps on TP1 against a
-median stop distance of 17.3 bps -- but introduces an unmeasured one: a
-limit only fills if price comes back to the level, and it fails precisely
-on the setups that turn straight around off it. If the trades limits MISS
-are systematically better than the ones they catch, the cost saving is
-bought back through adverse selection.
+Written to test a limit entry resting at the order block's high, which
+smc_cycle briefly used (commit 5ee5816, reverted in a561a2d on the
+strength of this result). A limit removes a measured cost -- the
+market-order legs gave up 48.5 and 79.4 bps on TP1 against a median stop
+distance of 17.3 bps -- but introduces an unmeasured one: it only fills if
+price comes back to the level, and it fails precisely on the setups that
+turn straight around off it. If the trades limits MISS are systematically
+better than the ones they catch, the cost saving is bought back through
+adverse selection. They are, by a wide margin.
+
+The cohort split this found is now a strategy rule rather than only a
+diagnostic: smc_signals' require_ob_reclaim takes the retests that close
+back ABOVE the level (this module's "missed" group) and skips the ones
+that close below it. See smc_entry_spec for what that is worth once the
+entry is priced at a fill an order can actually get.
 
 find_smc_long_trades fills every entry the moment a bar's low touches
 ob_high, which is a touch, not a fill. This asks the counterfactual from
 the outside, without changing that shared function (the live bot calls it).
 
 Two models bracket the answer rather than pretending to one number. The
-live bot places its limit after the signal bar closes and cancels it
-LIMIT_FILL_TIMEOUT_SECS later -- about 7% of a 5-minute bar -- so:
+limit was placed after the signal bar closed and cancelled about 7% of a
+5-minute bar later, so:
 
   immediate: the signal bar CLOSED at or below ob_high, so price is
       already at the limit when the order arrives and it fills at once.
@@ -91,7 +98,11 @@ def classify_trades(bars: dict, trades: list[dict], model: str) -> list[dict]:
     """Tag each trade with whether a limit at its entry level would fill."""
     out = []
     for t in trades:
-        level = t["entry_price"]
+        # signal_price, not entry_price: the question is where a limit
+        # would have rested, which is the OB high the retest triggered on.
+        # They coincide only under the "level" fill spec, and entry_price
+        # is whatever the configured spec paid.
+        level = t["signal_price"]
         out.append({
             "entry_idx": t["entry_idx"],
             "entry_date": t["entry_date"],
