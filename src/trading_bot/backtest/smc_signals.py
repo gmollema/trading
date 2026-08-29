@@ -31,8 +31,10 @@ precise algorithm -- these choices are documented here, not hidden):
     mirrored for highs. This carries the same ~2-bar confirmation lag.
   - The OB candle is found by walking backward from a structure-break bar
     to the nearest bearish candle, capped at OB_SEARCH_LOOKBACK bars.
-  - Entry fill is assumed exact at the OB's high (a resting limit order),
-    not modeling slippage on a fast break-and-return.
+  - Entry fill: see ENTRY_FILLS below. The original spec filled at the
+    OB's high the instant a bar's low touched it, which no order type can
+    actually achieve (smc_fill_model, 2026-08-28); the reachable specs
+    fill on the bar AFTER the signal bar closes.
   - "Full exit on a new high" is interpreted as the first CONFIRMED swing
     high after entry (same pivot definition/lag as above), filled at that
     pivot bar's close.
@@ -139,6 +141,69 @@ def _slipped(price: float, bps: float, side: str) -> float:
     return price * factor
 
 
+# Where the entry actually fills, once a retest has been detected.
+#
+# "level" is the original spec: fill at the OB's high the instant a bar's
+# low touches it. Nothing achieves that. A limit resting there fills 31-42%
+# of the time and almost only when the setup is failing (smc_fill_model),
+# and a market order sent once the touch is known pays 48-79 bps on the
+# comparable leg against a 17.3 bps median stop distance. The level is not
+# a price this strategy can trade at; it is only the trigger.
+#
+# The other two are reachable by construction: the signal is decided on a
+# CLOSED bar and the fill happens on the next one, which is what a market
+# order sent at the close actually gets. They bracket where in that bar the
+# fill lands rather than claiming one number:
+#
+#   next_open: the first print of the fill bar -- what an order sent the
+#       instant the signal bar closes should get.
+#   next_high: the worst price the fill bar ever offered. A hard upper
+#       bound on what any fill inside that bar could have cost, however
+#       late the order went in.
+#
+# The live cycle currently fires ~2 minutes into the fill bar, so its true
+# fill sits between the two, nearer next_open the earlier the cycle runs.
+ENTRY_FILLS = ("level", "next_open", "next_high")
+DEFAULT_ENTRY_FILL = "level"
+
+
+def _same_session(dates: list, a: int, b: int) -> bool:
+    """Whether bars a and b fall on the same calendar day.
+
+    Bars carry pandas Timestamps in every real caller. The unit fixtures
+    use plain integers as date stand-ins, which have no .date(); those
+    describe one continuous session, so treat them as such rather than
+    forcing every fixture to grow real datetimes.
+    """
+    da, db = dates[a], dates[b]
+    if hasattr(da, "date") and hasattr(db, "date"):
+        return da.date() == db.date()
+    return True
+
+
+def _is_last_bar_of_day(dates: list, i: int, n: int) -> bool:
+    return i == n - 1 or not _same_session(dates, i, i + 1)
+
+
+def _entry_fill_bar(dates: list, i: int, n: int, entry_fill: str, force_close_same_day: bool) -> int | None:
+    """Index of the bar the entry fills on, or None if it cannot fill.
+
+    A reachable fill needs a bar after the signal bar, in the same session
+    -- nothing rests overnight, and an order sent at 15:55 is not live at
+    the next open. Under force_close_same_day the FILL bar (not the signal
+    bar) is what must not be a day's last, since that is the bar the
+    position would have to be closed on.
+    """
+    fill_idx = i if entry_fill == "level" else i + 1
+    if fill_idx >= n:
+        return None
+    if fill_idx != i and not _same_session(dates, i, fill_idx):
+        return None
+    if force_close_same_day and _is_last_bar_of_day(dates, fill_idx, n):
+        return None
+    return fill_idx
+
+
 def find_smc_long_trades(
     bars: dict,
     time_window_bars: int = DEFAULT_TIME_WINDOW_BARS,
@@ -149,6 +214,8 @@ def find_smc_long_trades(
     slippage_bps: dict | float | None = None,
     post_tp1_stop_fraction: float = DEFAULT_POST_TP1_STOP_FRACTION,
     exit_fully_at_tp1: bool = False,
+    entry_fill: str = DEFAULT_ENTRY_FILL,
+    require_ob_reclaim: bool = False,
 ) -> list[dict]:
     """Scan one symbol's chronological 5-min bars and return every long
     trade this Level 1 SMC strategy would have taken, fully simulated
@@ -198,6 +265,30 @@ def find_smc_long_trades(
             because breakeven is not free: it converts a large share of
             trades into scratches that still occupy one of the portfolio's
             concurrent-position slots.
+        entry_fill: where the entry fills once a retest is detected -- one
+            of ENTRY_FILLS. "level" (the default, and the only behavior
+            available before this was a parameter) fills at the OB high on
+            the touching bar, which is what every figure in this repo
+            before 2026-08-29 assumed and what nothing can actually
+            execute. "next_open" and "next_high" decide the signal on the
+            CLOSED touching bar and fill on the next one, which a market
+            order sent at that close does achieve; they bracket where
+            inside the fill bar the order lands. Under both, `entry_idx`
+            and `entry_date` refer to the FILL bar, while `signal_idx` and
+            `signal_price` record the bar and level that triggered it.
+        require_ob_reclaim: only take the retest if the touching bar also
+            CLOSES back above the OB high -- the setup rejecting the level
+            rather than sinking through it. This is a signal filter, not a
+            fill model: it selects a subset of the same retests, so its
+            results stay directly comparable. smc_fill_model measured the
+            two cohorts on 17,354 signals and they are barely the same
+            strategy -- bars closing back above the level returned +0.49%
+            mean at a 62% win rate, bars closing below returned -0.05% at
+            18%. Either way the first retest MITIGATES the order block, so
+            a rejected one is consumed rather than left pending for a
+            second attempt; that keeps the "only the FIRST retest counts"
+            rule intact instead of quietly inventing a wait-for-a-better-
+            retest strategy.
         exit_fully_at_tp1: sell the ENTIRE position at tp1_price instead of
             tp1_fraction of it, ending the trade there -- no runner, no
             breakeven stop, no new-high exit. This is the exit policy that
@@ -209,8 +300,9 @@ def find_smc_long_trades(
             has nothing left to place.
 
     Returns:
-        list of dicts: {entry_idx, entry_date, entry_price, stop_price,
-        initial_stop_price, ob_idx, tp1_price (or None), fills: [{"idx",
+        list of dicts: {entry_idx, entry_date, entry_price, signal_idx,
+        signal_price, stop_price, initial_stop_price, ob_idx, tp1_price
+        (or None), fills: [{"idx",
         "date","price","qty_fraction","reason"}, ...]} -- qty_fraction sums
         to 1.0 across a trade's fills (0.25 at TP1 then 0.75 at exit, or
         1.0 in one fill for a stop-out / no-TP1 exit). `stop_price` is
@@ -220,6 +312,8 @@ def find_smc_long_trades(
         and never mutated; anything computing entry-time risk (e.g.
         position sizing) must use `initial_stop_price`, not `stop_price`.
     """
+    if entry_fill not in ENTRY_FILLS:
+        raise ValueError(f"unknown entry_fill: {entry_fill!r}; expected one of {list(ENTRY_FILLS)}")
     opens, highs, lows, closes, dates = bars["open"], bars["high"], bars["low"], bars["close"], bars["date"]
     slip = _normalize_slippage_bps(slippage_bps)
     n = len(closes)
@@ -349,32 +443,68 @@ def find_smc_long_trades(
                 open_trade = None
 
         # --- look for a new entry (only when flat) ---
-        # With force_close_same_day, skip entries on the last bar of a day:
-        # there'd be no later bar left that day to force-close it at, which
-        # would otherwise let exactly this edge case ride overnight anyway.
-        entry_window_open = not (
-            force_close_same_day and (i == n - 1 or dates[i].date() != dates[i + 1].date())
-        )
-        if open_trade is None and pending_bull_obs and entry_window_open:
-            for ob in pending_bull_obs:
-                if ob["ob_idx"] < i and lows[i] <= ob["ob_high"]:
-                    entry_price = _slipped(ob["ob_high"], slip["entry"], "buy")
-                    stop_price = ob["ob_low"]
-                    if entry_price <= stop_price:
-                        continue  # degenerate OB, skip
-                    tp1_price = None
-                    resistances_above = [b["ob_low"] for b in bearish_obs if b["ob_low"] > entry_price]
-                    if resistances_above:
-                        tp1_price = min(resistances_above)
+        # Bar i is the SIGNAL bar: its low reached the OB's high. Where
+        # that turns into a fill is entry_fill's job -- for the reachable
+        # specs the position does not exist until the next bar, so it is
+        # created here with entry_idx pointing there and the exit
+        # management above only picks it up from that bar onward.
+        # Iterating a copy: a retest consumes its order block whether or
+        # not it produces a trade, and the rejection is about that block
+        # rather than about the bar -- a second, lower OB touched by the
+        # same bar still gets its own test.
+        if open_trade is None and pending_bull_obs:
+            for ob in list(pending_bull_obs):
+                if ob["ob_idx"] >= i or lows[i] > ob["ob_high"]:
+                    continue
 
-                    open_trade = {
-                        "entry_idx": i, "entry_date": dates[i], "entry_price": entry_price,
-                        "stop_price": stop_price, "initial_stop_price": stop_price,
-                        "ob_idx": ob["ob_idx"], "tp1_price": tp1_price,
-                        "tp1_done": False, "remaining_fraction": 1.0, "fills": [],
-                    }
-                    pending_bull_obs.remove(ob)  # mitigated -- first retest consumed it
+                if require_ob_reclaim and closes[i] <= ob["ob_high"]:
+                    # Retested and rejected: still mitigated, just not traded.
+                    pending_bull_obs.remove(ob)
+                    continue
+
+                fill_idx = _entry_fill_bar(dates, i, n, entry_fill, force_close_same_day)
+                if fill_idx is None:
+                    # No reachable fill bar, and that is a property of the
+                    # bar, not of this block -- so it holds for every other
+                    # pending OB too. Leave them all pending.
                     break
+
+                raw_entry = ob["ob_high"] if entry_fill == "level" else (
+                    opens[fill_idx] if entry_fill == "next_open" else highs[fill_idx]
+                )
+                entry_price = _slipped(raw_entry, slip["entry"], "buy")
+                stop_price = ob["ob_low"]
+                if entry_price <= stop_price:
+                    # No positive risk-per-share to size against, so the
+                    # trade is dropped -- but the retest still happened, so
+                    # the block is consumed rather than left pending to
+                    # fire again a bar later at some unrelated price.
+                    #
+                    # Under "level" this is a flat OB candle and could
+                    # never have traded anyway (the comparison is on fixed
+                    # values, so it fails identically on every later
+                    # touch). Under the reachable specs it means the fill
+                    # bar opened at or below the stop, which live is a fill
+                    # followed instantly by a stop-out, not a skipped
+                    # trade -- the one place this model flatters itself.
+                    # It shows up in smc_entry_spec's `signals` column as
+                    # part of the gap between the level and next_* rows.
+                    pending_bull_obs.remove(ob)
+                    continue
+                tp1_price = None
+                resistances_above = [b["ob_low"] for b in bearish_obs if b["ob_low"] > entry_price]
+                if resistances_above:
+                    tp1_price = min(resistances_above)
+
+                open_trade = {
+                    "entry_idx": fill_idx, "entry_date": dates[fill_idx], "entry_price": entry_price,
+                    "signal_idx": i, "signal_price": ob["ob_high"],
+                    "stop_price": stop_price, "initial_stop_price": stop_price,
+                    "ob_idx": ob["ob_idx"], "tp1_price": tp1_price,
+                    "tp1_done": False, "remaining_fraction": 1.0, "fills": [],
+                }
+                pending_bull_obs.remove(ob)  # mitigated -- first retest consumed it
+                break
 
     # End-of-data safety net: close any still-open trade at the last bar.
     if open_trade is not None:
@@ -402,6 +532,7 @@ def latest_entry_signal(
     tp1_fraction: float = DEFAULT_TP1_FRACTION,
     swing_window: int = DEFAULT_SWING_WINDOW,
     require_confirmed_trend: bool = False,
+    require_ob_reclaim: bool = False,
 ) -> dict | None:
     """If this symbol's SMC entry would trigger on the LAST bar of `bars`,
     return that trade dict (entry_price = OB high, stop_price = OB low,
@@ -413,13 +544,29 @@ def latest_entry_signal(
     suppress every live entry. Same-day discipline is enforced by the
     live bot's own EOD force-close instead, and the entry-window gate
     (no entries near the close) covers the true last-bar-of-day case.
+
+    Equally deliberately runs with entry_fill="level", the unreachable
+    spec, and that is not a contradiction: the reachable specs fill on the
+    bar AFTER the signal, which by definition does not exist yet at the
+    moment the bot has to act. What the caller needs from this function is
+    "is there a signal on the last closed bar", and entry_price is the
+    TRIGGER level, not a fill prediction -- smc_cycle sends a market order
+    and records what it actually got (see its signal_price /
+    entry_slippage_bps logging). Running the fill spec here would return
+    nothing at all, since entry_idx could never equal n-1.
+
+    require_ob_reclaim, by contrast, IS a signal-side rule and must match
+    the backtest exactly, so it is passed straight through. `bars` must
+    therefore end on a CLOSED bar: a forming bar's close is just the last
+    trade, and a reclaim that has not held to the bar's end is not the
+    same signal the backtest scored.
     """
     n = len(bars["close"])
     if n == 0:
         return None
     for trade in find_smc_long_trades(
         bars, time_window_bars, tp1_fraction, swing_window, require_confirmed_trend,
-        force_close_same_day=False,
+        force_close_same_day=False, require_ob_reclaim=require_ob_reclaim,
     ):
         if trade["entry_idx"] == n - 1:
             return trade

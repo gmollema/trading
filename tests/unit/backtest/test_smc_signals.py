@@ -489,3 +489,143 @@ class TestExitFullyAtTp1(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestEntryFill(unittest.TestCase):
+    """The reachable entry specs, over the same hand-traced lifecycle
+    fixture. Its retest bar is idx 8 (19, 19, 10, 13): its low (10) reaches
+    the OB high (11), and the bar after it opens at 13 and ranges up to 16.
+    So the three specs price the identical signal at 11 (unreachable), 13
+    (next_open) and 16 (next_high)."""
+
+    LIFECYCLE_ROWS = [
+        (10, 10, 9, 10), (10, 10, 9, 10), (12, 12, 11, 12), (10, 10, 9, 10), (10, 10, 9, 10),
+        (11, 11, 8, 9), (9, 17, 12, 16), (16, 20, 16, 19), (19, 19, 10, 13),
+        (13, 16, 13, 15), (15, 19, 15, 18), (18, 25, 17, 17), (17, 20, 15, 16), (16, 18, 13, 14),
+    ]
+
+    def test_level_is_the_default_and_unchanged(self):
+        trades = smc.find_smc_long_trades(_bars(self.LIFECYCLE_ROWS))
+        self.assertEqual(trades[0]["entry_idx"], 8)
+        self.assertEqual(trades[0]["entry_price"], 11)
+
+    def test_next_open_fills_on_the_following_bars_open(self):
+        trades = smc.find_smc_long_trades(_bars(self.LIFECYCLE_ROWS), entry_fill="next_open")
+        self.assertEqual(len(trades), 1)
+        trade = trades[0]
+        self.assertEqual(trade["entry_idx"], 9)
+        self.assertEqual(trade["entry_date"], 9)
+        self.assertEqual(trade["entry_price"], 13)  # opens[9]
+        self.assertEqual(trade["stop_price"], 8)    # still the OB's low
+        self.assertEqual(trade["fills"][0]["reason"], "new_high_exit")
+
+    def test_next_high_fills_at_the_worst_price_of_the_fill_bar(self):
+        trades = smc.find_smc_long_trades(_bars(self.LIFECYCLE_ROWS), entry_fill="next_high")
+        self.assertEqual(trades[0]["entry_idx"], 9)
+        self.assertEqual(trades[0]["entry_price"], 16)  # highs[9]
+
+    def test_signal_bar_and_level_are_recorded_separately_from_the_fill(self):
+        """The OB high is the trigger, not the fill -- both are kept, so a
+        run can be compared against the unreachable spec it replaces."""
+        trades = smc.find_smc_long_trades(_bars(self.LIFECYCLE_ROWS), entry_fill="next_open")
+        trade = trades[0]
+        self.assertEqual(trade["signal_idx"], 8)
+        self.assertEqual(trade["signal_price"], 11)
+        self.assertNotEqual(trade["entry_price"], trade["signal_price"])
+
+    def test_position_is_managed_from_the_fill_bar(self):
+        """A stop breach on the FILL bar counts: the position exists from
+        that bar's open onward."""
+        rows = list(self.LIFECYCLE_ROWS)
+        rows[9] = (13, 16, 7, 15)  # dips to 7, under the stop at 8
+        trades = smc.find_smc_long_trades(_bars(rows), entry_fill="next_open")
+        self.assertEqual(len(trades), 1)
+        fill = trades[0]["fills"][0]
+        self.assertEqual(fill["reason"], "stop")
+        self.assertEqual(fill["idx"], 9)
+
+    def test_no_trade_when_the_signal_lands_on_the_last_bar(self):
+        """Nothing to fill on -- the bar after the signal is the one that
+        does not exist. Padded with 2 flat leading bars so truncating at
+        the retest still clears find_smc_long_trades' n >= 10 minimum."""
+        padded = [(10, 10, 9, 10)] * 2 + list(self.LIFECYCLE_ROWS)
+        rows = padded[:11]  # ends on the retest bar (idx 8 + 2 padding)
+        self.assertEqual(smc.find_smc_long_trades(_bars(rows), entry_fill="next_open"), [])
+        self.assertEqual(len(smc.find_smc_long_trades(_bars(rows))), 1)  # level still fills
+
+    def test_no_trade_across_a_session_boundary(self):
+        """An order placed at a day's close is not live at the next open,
+        and this strategy holds nothing overnight."""
+        bars = _bars_with_day_boundary(self.LIFECYCLE_ROWS, day_boundary_idx=9)
+        self.assertEqual(smc.find_smc_long_trades(bars, entry_fill="next_open"), [])
+
+    def test_fill_bar_opening_below_the_stop_is_dropped(self):
+        """No positive risk-per-share to size against. Documented in the
+        entry block as the one place this model flatters itself: live it
+        would be a fill and an immediate stop-out, not a skipped trade.
+        The OB is consumed, so the drop is not undone by re-entering a bar
+        later at whatever price the recovery offers."""
+        rows = list(self.LIFECYCLE_ROWS)
+        rows[9] = (7, 16, 6, 15)  # opens at 7, below the OB low (8)
+        self.assertEqual(smc.find_smc_long_trades(_bars(rows), entry_fill="next_open"), [])
+
+    def test_slippage_still_applies_on_top_of_the_fill_price(self):
+        trades = smc.find_smc_long_trades(
+            _bars(self.LIFECYCLE_ROWS), entry_fill="next_open", slippage_bps={"entry": 100.0},
+        )
+        self.assertAlmostEqual(trades[0]["entry_price"], 13 * 1.01)
+        self.assertEqual(trades[0]["signal_price"], 11)  # the level is never slipped
+
+    def test_unknown_spec_is_rejected(self):
+        with self.assertRaises(ValueError):
+            smc.find_smc_long_trades(_bars(self.LIFECYCLE_ROWS), entry_fill="mid")
+
+
+class TestRequireObReclaim(unittest.TestCase):
+    """The signal-side filter: the retest bar must CLOSE back above the OB
+    high. Same fixture, with the retest bar's close moved either side of
+    the level (11) -- nothing else about the structure depends on it."""
+
+    ROWS_RECLAIMED = TestEntryFill.LIFECYCLE_ROWS                      # idx 8 closes at 13
+    ROWS_REJECTED = (
+        TestEntryFill.LIFECYCLE_ROWS[:8]
+        + [(19, 19, 10, 10.5)]                                          # idx 8 closes at 10.5
+        + TestEntryFill.LIFECYCLE_ROWS[9:]
+    )
+
+    def test_bar_closing_back_above_the_level_still_trades(self):
+        trades = smc.find_smc_long_trades(_bars(self.ROWS_RECLAIMED), require_ob_reclaim=True)
+        self.assertEqual(len(trades), 1)
+        self.assertEqual(trades[0]["entry_idx"], 8)
+
+    def test_bar_closing_below_the_level_is_skipped(self):
+        bars = _bars(self.ROWS_REJECTED)
+        self.assertEqual(len(smc.find_smc_long_trades(bars)), 1)  # unfiltered still takes it
+        self.assertEqual(smc.find_smc_long_trades(bars, require_ob_reclaim=True), [])
+
+    def test_a_rejected_retest_still_mitigates_the_order_block(self):
+        """"Only the FIRST retest counts" survives the filter: a second
+        touch of the same OB must not become a second chance at it."""
+        rows = list(self.ROWS_REJECTED) + [
+            (14, 14, 10, 13),   # 14 -- touches the OB high (11) again, and reclaims
+            (13, 15, 13, 14),   # 15
+        ]
+        trades = smc.find_smc_long_trades(_bars(rows), require_ob_reclaim=True)
+        self.assertEqual(trades, [])
+
+    def test_composes_with_a_reachable_fill(self):
+        trades = smc.find_smc_long_trades(
+            _bars(self.ROWS_RECLAIMED), entry_fill="next_open", require_ob_reclaim=True,
+        )
+        self.assertEqual(len(trades), 1)
+        self.assertEqual(trades[0]["entry_idx"], 9)
+        self.assertEqual(trades[0]["entry_price"], 13)
+
+    def test_live_adapter_applies_the_same_filter(self):
+        """The reclaim rule is signal-side, so smc_cycle must see exactly
+        what the backtest scored -- unlike entry_fill, which cannot apply
+        live (see latest_entry_signal's docstring)."""
+        padded = [(10, 10, 9, 10)] * 2 + list(self.ROWS_REJECTED)
+        bars = _bars(padded[:11])  # ends on the retest bar (idx 8 + 2 padding)
+        self.assertIsNotNone(smc.latest_entry_signal(bars))
+        self.assertIsNone(smc.latest_entry_signal(bars, require_ob_reclaim=True))
