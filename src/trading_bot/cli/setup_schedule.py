@@ -141,6 +141,38 @@ def quoted_tr(module: str) -> str:
     return f'"{VENV_PY}" -m {module}'
 
 
+# Tasks this script registers but must NOT leave running.
+#
+# The gap-and-go strategy was switched off on 2026-08-13 and stayed off,
+# and on 2026-08-29 it was priced at reachable fills for the first time:
+# it loses on every cost basis, -5.3% out of sample with commission,
+# profit factor 0.57 (see cli/gapgo_exec_spec). Re-running this script
+# used to bring it straight back -- run_schtasks_create passes /F, so all
+# fourteen tasks are recreated Ready regardless of how they were left --
+# which made an ordinary re-run of a setup script enough to restart a bot
+# known to lose money.
+#
+# They are still REGISTERED rather than dropped: the schedule is the
+# record of how this strategy ran, and re-enabling it is then one
+# schtasks call rather than an archaeology exercise. They just come back
+# disabled.
+DISABLED_AFTER_CREATE = {
+    "HT_Cycle",
+    *(f"HT_Prefilter_{i:02d}" for i in range(1, 8)),
+}
+
+
+def disable_task(task_name: str) -> None:
+    result = subprocess.run(
+        ["schtasks", "/change", "/tn", task_name, "/disable"],
+        check=False, capture_output=True, text=True,
+    )
+    if result.returncode != 0:
+        print(f"FAILED to disable {task_name}: {result.stderr.strip()}", file=sys.stderr)
+    else:
+        print(f"Disabled {task_name}")
+
+
 def main() -> None:
     if not VENV_PY.exists():
         print(f"ERROR: venv python not found at {VENV_PY}. Create the venv first.", file=sys.stderr)
@@ -198,6 +230,12 @@ def main() -> None:
     print()
     # schtasks /query /tn does NOT support wildcards (e.g. "HT_*") - it
     # expects an exact task name, so query everything and filter here.
+    # After creating, not instead of: schtasks has no "create disabled",
+    # so the only way to register a task without arming it is to turn it
+    # off immediately afterwards.
+    for task_name in sorted(DISABLED_AFTER_CREATE):
+        disable_task(task_name)
+
     result = subprocess.run(
         ["schtasks", "/query", "/fo", "TABLE"],
         check=False,
@@ -214,9 +252,12 @@ def main() -> None:
         print("\n".join(ht_lines))
 
     print(
-        "SCHEDULED: 14 tasks created (incl. HT_SMC_Prefilter/HT_SMC_Cycle for the SMC bot, "
-        "HT_HeartbeatMonitor as a dead-man's switch for both). "
-        "The bots will fire on their own starting next market open. Watch Telegram."
+        f"SCHEDULED: 14 tasks created (incl. HT_SMC_Prefilter/HT_SMC_Cycle for the SMC bot, "
+        f"HT_HeartbeatMonitor as a dead-man's switch for both). "
+        f"{len(DISABLED_AFTER_CREATE)} gap-and-go tasks were created and then DISABLED "
+        f"({', '.join(sorted(DISABLED_AFTER_CREATE))}) -- that strategy loses on every cost "
+        f"basis and is deliberately not running; enable them by hand if that ever changes. "
+        f"The SMC bot will fire on its own starting next market open. Watch Telegram."
     )
 
 

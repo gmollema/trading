@@ -162,3 +162,51 @@ class TestMain(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestDisableTask(unittest.TestCase):
+    def test_issues_the_disable_command(self):
+        with patch("trading_bot.cli.setup_schedule.subprocess.run",
+                   return_value=MagicMock(returncode=0, stderr="")) as mock_run:
+            with redirect_stdout(io.StringIO()) as buf:
+                setup_schedule.disable_task("HT_Test")
+        self.assertEqual(mock_run.call_args[0][0],
+                         ["schtasks", "/change", "/tn", "HT_Test", "/disable"])
+        self.assertIn("Disabled HT_Test", buf.getvalue())
+
+    def test_a_failure_is_reported_not_swallowed(self):
+        with patch("trading_bot.cli.setup_schedule.subprocess.run",
+                   return_value=MagicMock(returncode=1, stderr="ERROR: nope")):
+            with redirect_stdout(io.StringIO()) as out:
+                setup_schedule.disable_task("HT_Test")
+        self.assertNotIn("Disabled", out.getvalue())
+
+
+class TestGapAndGoStaysDisabled(unittest.TestCase):
+    """setup_schedule recreates every task with /F, so before this it took
+    one ordinary re-run to restart a strategy that loses on every cost
+    basis. The tasks are still registered -- just not armed."""
+
+    def test_the_disabled_set_is_exactly_the_gap_and_go_tasks(self):
+        self.assertEqual(
+            setup_schedule.DISABLED_AFTER_CREATE,
+            {"HT_Cycle", *(f"HT_Prefilter_{i:02d}" for i in range(1, 8))},
+        )
+
+    def test_no_smc_or_shared_task_is_in_it(self):
+        """Disabling HT_HeartbeatMonitor or the SMC pair by accident would
+        silently stop the bot that IS meant to be running."""
+        for name in ("HT_SMC_Cycle", "HT_SMC_Prefilter", "HT_HeartbeatMonitor",
+                     "HT_LogRotate", "HT_KeepAwake", "HT_Dashboard"):
+            self.assertNotIn(name, setup_schedule.DISABLED_AFTER_CREATE)
+
+    def test_main_disables_every_one_of_them_after_creating_them(self):
+        with patch("trading_bot.cli.setup_schedule.subprocess.run",
+                   return_value=MagicMock(returncode=0, stderr="", stdout="")), \
+             patch("trading_bot.cli.setup_schedule.VENV_PY") as venv, \
+             patch("trading_bot.cli.setup_schedule.disable_task") as mock_disable:
+            venv.exists.return_value = True
+            with redirect_stdout(io.StringIO()):
+                setup_schedule.main()
+        disabled = {call[0][0] for call in mock_disable.call_args_list}
+        self.assertEqual(disabled, setup_schedule.DISABLED_AFTER_CREATE)
