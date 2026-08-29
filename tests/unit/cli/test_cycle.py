@@ -1,13 +1,5 @@
 """Unit tests for the pure/near-pure helper functions in trading_bot.cli.cycle.
 
-cycle.py runs a market-status gate at MODULE IMPORT TIME (by design -- see
-its module docstring -- so Task Scheduler runs exit in well under a second
-outside market hours, before the heavy numpy/yfinance/ib_async imports).
-That means a plain `import` of this module during a test run outside
-10:00-16:00 ET on a weekday would call sys.exit(0) mid-import and abort
-collection. We neutralize sys.exit for just that one import statement so
-the module always loads fully regardless of when the suite runs.
-
 Covers: get_market_status, _cast_bools, ibkr_to_yahoo, compute_swing_lows,
 evaluate_entry_filters (get_daily_context/get_intraday_context patched
 out, since those hit yfinance), _cancel_stop, manage_position,
@@ -34,8 +26,7 @@ from zoneinfo import ZoneInfo
 import numpy as np
 import pandas as pd
 
-with patch("sys.exit"):
-    from trading_bot.cli import cycle
+from trading_bot.cli import cycle
 
 ET = ZoneInfo("America/New_York")
 

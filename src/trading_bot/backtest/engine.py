@@ -15,21 +15,14 @@ Two phases:
 
 from __future__ import annotations
 
-import contextlib
-import io
 import math
 from pathlib import Path
-from unittest.mock import patch
 
 import pandas as pd
 
-# See backtest/portfolio.py for why this import must be guarded the same
-# way tests/unit/cli/test_cycle.py guards it.
-with patch("sys.exit"), contextlib.redirect_stdout(io.StringIO()):
-    from trading_bot.cli.cycle import get_market_status
-
 from trading_bot.backtest import filters, portfolio
 from trading_bot.backtest.data import DAILY_DIR, INTRADAY_DIR, build_symbol_frame
+from trading_bot.cli.cycle import get_market_status
 
 DEFAULT_MAX_POSITION_PCT = 10.0
 

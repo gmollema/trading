@@ -11,20 +11,11 @@ gap-through risk.
 
 from __future__ import annotations
 
-import contextlib
-import io
 import math
-from unittest.mock import patch
 
 import pandas as pd
 
-# cycle.py runs a market-status gate at import time that calls sys.exit(0)
-# (and prints a "Market status: ... Exiting." line) outside 10:00-16:00 ET
-# on a weekday (see its module docstring); neutralize both for just this
-# import so compute_swing_lows loads cleanly regardless of when the
-# backtest is run. Same sys.exit technique tests/unit/cli/test_cycle.py uses.
-with patch("sys.exit"), contextlib.redirect_stdout(io.StringIO()):
-    from trading_bot.cli.cycle import compute_swing_lows
+from trading_bot.cli.cycle import compute_swing_lows
 
 
 DEFAULT_COMMISSION_PER_SHARE = 0.005

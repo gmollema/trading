@@ -5,7 +5,10 @@ Intended to run every 5 minutes via Windows Task Scheduler, all day.
 Design note: the market-status gate below runs BEFORE any heavy imports
 (yfinance, ib_async, pandas, numpy, dotenv) so that weekend / too_early /
 closed cycles exit in well under 1 second - this is what makes "every 5
-minutes, all day, every day" cheap to run unattended.
+minutes, all day, every day" cheap to run unattended. It is guarded on
+__main__, matching cli/smc_cycle.py, so that the speed applies to running
+this module while IMPORTING it stays harmless; three call sites otherwise
+had to neutralise sys.exit just to borrow a pure function from here.
 
 IMPORTANT CAVEATS (read before relying on this for anything but paper
 trading dry-runs):
@@ -127,14 +130,19 @@ def _fast_exit_check() -> str | None:
     return None
 
 
-# --- Fast-path gate: this MUST run before heavy imports below. ---
-_EARLY_EXIT_STATUS = _fast_exit_check()
-if _EARLY_EXIT_STATUS is not None:
-    print(f"Market status: {_EARLY_EXIT_STATUS}. Exiting.")
-    sys.exit(0)
+# --- Fast-path gate: this MUST run before the heavy imports below. ---
+if __name__ == "__main__":
+    _EARLY_EXIT_STATUS = _fast_exit_check()
+    if _EARLY_EXIT_STATUS is not None:
+        print(f"Market status: {_EARLY_EXIT_STATUS}. Exiting.")
+        sys.exit(0)
 
 # --------------------------------------------------------------------------
-# Heavy imports - only reached once we know the market is plausibly open.
+# Heavy imports - only reached once the market is plausibly open, or when
+# this module is IMPORTED rather than run. The gate above is guarded so
+# that importing it is never fatal: backtest/engine.py and
+# backtest/portfolio.py both borrow pure functions from here, and used to
+# have to neutralise sys.exit around the import to get them.
 # --------------------------------------------------------------------------
 import numpy as np  # noqa: E402
 import yfinance as yf  # noqa: E402
