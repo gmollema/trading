@@ -629,3 +629,152 @@ class TestRequireObReclaim(unittest.TestCase):
         bars = _bars(padded[:11])  # ends on the retest bar (idx 8 + 2 padding)
         self.assertIsNotNone(smc.latest_entry_signal(bars))
         self.assertIsNone(smc.latest_entry_signal(bars, require_ob_reclaim=True))
+
+
+class TestExitFill(unittest.TestCase):
+    """The exits carried the same defect the entry did: each booked its
+    trigger as its fill. The new-high exit was the worst -- it fires only
+    once a pivot is CONFIRMED, swing_window bars later, but filled at the
+    pivot bar's own close.
+
+    All of these use the hand-traced lifecycle fixture (entry at idx 8 on
+    the OB high of 11, stop at 8) with swing_window=2, so the new-high
+    pivot at idx 11 confirms at idx 13.
+    """
+
+    LIFECYCLE_ROWS = TestEntryFill.LIFECYCLE_ROWS
+
+    def test_new_high_exit_fills_after_confirmation_not_at_the_pivot(self):
+        rows = list(self.LIFECYCLE_ROWS) + [(14, 15, 13, 14)]  # idx 14, the fill bar
+        bars = _bars(rows)
+
+        level = smc.find_smc_long_trades(bars)[0]["fills"][0]
+        self.assertEqual(level["idx"], 11)              # the pivot bar
+        self.assertEqual(level["price"], 17)            # its close
+
+        reachable = smc.find_smc_long_trades(bars, exit_fill="next_open")[0]["fills"][0]
+        self.assertEqual(reachable["reason"], "new_high_exit")
+        self.assertEqual(reachable["idx"], 14)          # the bar after confirmation at 13
+        self.assertEqual(reachable["price"], 14)        # opens[14]
+
+    def test_new_high_exit_falls_back_to_the_confirming_close(self):
+        """No bar left to fill on: the market order still executes, at the
+        close of the bar that revealed the exit. An exit is not optional
+        the way an entry is."""
+        bars = _bars(self.LIFECYCLE_ROWS)  # confirmation lands on the last bar, idx 13
+        fill = smc.find_smc_long_trades(bars, exit_fill="next_open")[0]["fills"][0]
+        self.assertEqual(fill["reason"], "new_high_exit")
+        self.assertEqual(fill["idx"], 13)
+        self.assertEqual(fill["price"], self.LIFECYCLE_ROWS[13][3])
+
+    def test_stop_still_fills_at_its_level(self):
+        """It rests at the broker and triggers intrabar, so unlike the
+        others it earns its level."""
+        rows = list(self.LIFECYCLE_ROWS)
+        rows[9] = (13, 13, 5, 6)  # trades down through the stop at 8, opening above it
+        fill = smc.find_smc_long_trades(_bars(rows), exit_fill="next_open")[0]["fills"][0]
+        self.assertEqual(fill["reason"], "stop")
+        self.assertEqual(fill["price"], 8)
+
+    def test_stop_that_gaps_through_fills_at_the_open(self):
+        """A bar that OPENED under the stop never offered the level."""
+        rows = list(self.LIFECYCLE_ROWS)
+        rows[9] = (6, 7, 5, 6)  # opens at 6, below the stop at 8
+        bars = _bars(rows)
+
+        self.assertEqual(smc.find_smc_long_trades(bars)[0]["fills"][0]["price"], 8)
+        gapped = smc.find_smc_long_trades(bars, exit_fill="next_open")[0]["fills"][0]
+        self.assertEqual(gapped["reason"], "stop")
+        self.assertEqual(gapped["price"], 6)
+
+    def test_force_close_fills_at_the_bars_open(self):
+        """The bot fires at 15:51 ET, inside the bar before the day's
+        last, so that last bar's OPEN is the nearest reachable price --
+        its close is nine minutes of hindsight."""
+        bars = _bars_with_day_boundary(self.LIFECYCLE_ROWS, day_boundary_idx=10)
+
+        level = smc.find_smc_long_trades(bars, force_close_same_day=True)[0]["fills"][0]
+        self.assertEqual(level["reason"], "same_day_force_close")
+        self.assertEqual(level["price"], self.LIFECYCLE_ROWS[9][3])  # closes[9]
+
+        reachable = smc.find_smc_long_trades(
+            bars, force_close_same_day=True, exit_fill="next_open",
+        )[0]["fills"][0]
+        self.assertEqual(reachable["reason"], "same_day_force_close")
+        self.assertEqual(reachable["idx"], 9)
+        self.assertEqual(reachable["price"], self.LIFECYCLE_ROWS[9][0])  # opens[9]
+
+    def test_unknown_spec_is_rejected(self):
+        with self.assertRaises(ValueError):
+            smc.find_smc_long_trades(_bars(self.LIFECYCLE_ROWS), exit_fill="market")
+
+
+class TestTp1ExitFill(unittest.TestCase):
+    """TP1 needs a bearish order block above entry to exist at all, so it
+    gets its own fixture: the lifecycle scenario with a downside break
+    added before the entry, which registers a bearish OB whose low becomes
+    the target.
+    """
+
+    ROWS = [
+        (10, 10, 9, 10),    # 0
+        (10, 10, 9, 10),    # 1
+        (12, 12, 11, 12),   # 2  swing high (12), confirmed at idx 4
+        (10, 10, 9, 10),    # 3
+        (10, 10, 9, 10),    # 4
+        (11, 11, 8, 9),     # 5  bullish OB candle (high=11, low=8)
+        (9, 17, 12, 16),    # 6  impulse closes above the swing high -> ChoCh
+        (16, 20, 16, 19),   # 7  FVG confirmed: highs[5]=11 < lows[7]=16
+        (18, 19, 17, 18),   # 8
+        (18, 18, 15, 16),   # 9  swing low (15), confirmed at idx 11
+        (16, 19, 16, 18),   # 10
+        (18, 20, 17, 19),   # 11
+        (17, 19, 16, 18),   # 12 bullish -- becomes the BEARISH OB (low=16)
+        (16, 16, 13, 14),   # 13 closes below the swing low (15) -> bearish break
+        (14, 14, 10, 11),   # 14 pullback touches the OB top (11) -> ENTRY @ 11
+        (11, 13, 11, 13),   # 15
+        (13, 17, 13, 16),   # 16 high (17) reaches TP1 at the bearish OB low (16)
+        (15, 16, 14, 15),   # 17 the bar TP1 fills on under next_open
+        (15, 16, 14, 15),   # 18
+        (15, 16, 14, 15),   # 19
+    ]
+    ENTRY_IDX = 14
+    TP1_TOUCH_IDX = 16
+
+    def _trades(self, **kwargs):
+        return smc.find_smc_long_trades(_bars(self.ROWS), **kwargs)
+
+    def test_fixture_produces_a_tp1(self):
+        trade = self._trades()[0]
+        self.assertIsNotNone(trade["tp1_price"])
+        self.assertEqual([f["reason"] for f in trade["fills"]][0], "tp1")
+
+    def test_level_fills_at_the_target(self):
+        fill = self._trades()[0]["fills"][0]
+        trade = self._trades()[0]
+        self.assertEqual(fill["price"], trade["tp1_price"])
+
+    def test_next_open_fills_a_bar_later(self):
+        trade = self._trades(exit_fill="next_open")[0]
+        fill = trade["fills"][0]
+        self.assertEqual(fill["reason"], "tp1")
+        touch_idx = self._trades()[0]["fills"][0]["idx"]
+        self.assertEqual(fill["idx"], touch_idx + 1)
+        self.assertEqual(fill["price"], self.ROWS[touch_idx + 1][0])
+
+    def test_resting_limit_keeps_the_target(self):
+        """A sell limit above the market is not adversely selected the way
+        a buy limit at the entry level was: it fills exactly when price
+        reaches the target, which is the event being traded."""
+        trade = self._trades(exit_fill="next_open", tp1_resting_limit=True)[0]
+        fill = trade["fills"][0]
+        self.assertEqual(fill["reason"], "tp1")
+        self.assertEqual(fill["price"], trade["tp1_price"])
+        self.assertEqual(fill["idx"], self._trades()[0]["fills"][0]["idx"])
+
+    def test_breakeven_stop_is_clamped_to_what_tp1_actually_got(self):
+        """The stop is placed right after the TP1 leg fills, so that fill
+        is the market reference -- not a close the bot never traded at."""
+        trade = self._trades(exit_fill="next_open", post_tp1_stop_fraction=5.0)[0]
+        tp1_fill = trade["fills"][0]
+        self.assertLessEqual(trade["stop_price"], tp1_fill["price"])

@@ -185,6 +185,47 @@ def _is_last_bar_of_day(dates: list, i: int, n: int) -> bool:
     return i == n - 1 or not _same_session(dates, i, i + 1)
 
 
+# Where each EXIT fills, once the bar that reveals it has closed.
+#
+# "level" is the original spec and shares the entry's defect: it books the
+# trigger as the fill. The stop is the one leg that nearly earns it -- it
+# rests at IBKR as a real StopOrder and triggers intrabar -- but the other
+# three are market orders the bot sends only after a closed bar tells it
+# something happened, and one of them is far worse than the old entry ever
+# was. The new-high exit fires when a swing high is CONFIRMED, which takes
+# swing_window bars, yet fills at that pivot bar's close: at the
+# configured swing_window of 20 that is a sale at a price 100 minutes in
+# the past, at a local peak, chosen with hindsight.
+#
+# "next_open" prices each leg at what its own order type gets:
+#
+#   stop            still at its level, because it really does rest at the
+#                   broker -- except on a bar that OPENED through it,
+#                   which fills at that open, not at the level.
+#   tp1             the open of the bar after the one whose high reached
+#                   the target, unless tp1_resting_limit says the target
+#                   is a resting limit order.
+#   new_high_exit   the open of the bar after CONFIRMATION, not the pivot.
+#   force_close     that bar's open rather than its close. Approximate:
+#                   the bot fires at 15:51 ET, inside the 15:50 bar, so
+#                   the 15:55 bar's open is the nearest price in RTH 5-min
+#                   data and is ~4 minutes late rather than ~9.
+#
+# When no same-session bar follows, the market order still executes -- an
+# exit is not optional the way an entry is -- so it fills at the closing
+# price of the bar that revealed it.
+EXIT_FILLS = ("level", "next_open")
+DEFAULT_EXIT_FILL = "level"
+
+
+def _delayed_exit_fill(opens: list, closes: list, dates: list, i: int, n: int) -> tuple[int, float]:
+    """(fill bar, price) for an exit the bot learns about at bar i's close."""
+    nxt = i + 1
+    if nxt < n and _same_session(dates, i, nxt):
+        return nxt, opens[nxt]
+    return i, closes[i]
+
+
 def _entry_fill_bar(dates: list, i: int, n: int, entry_fill: str, force_close_same_day: bool) -> int | None:
     """Index of the bar the entry fills on, or None if it cannot fill.
 
@@ -216,6 +257,8 @@ def find_smc_long_trades(
     exit_fully_at_tp1: bool = False,
     entry_fill: str = DEFAULT_ENTRY_FILL,
     require_ob_reclaim: bool = False,
+    exit_fill: str = DEFAULT_EXIT_FILL,
+    tp1_resting_limit: bool = False,
 ) -> list[dict]:
     """Scan one symbol's chronological 5-min bars and return every long
     trade this Level 1 SMC strategy would have taken, fully simulated
@@ -289,6 +332,24 @@ def find_smc_long_trades(
             second attempt; that keeps the "only the FIRST retest counts"
             rule intact instead of quietly inventing a wait-for-a-better-
             retest strategy.
+        exit_fill: where each exit fills once the bar revealing it has
+            closed -- one of EXIT_FILLS, documented in full above them.
+            "level" (the default) books every trigger as its own fill,
+            which the exits can no more achieve than the entry could; the
+            new-high exit is the worst offender, selling at a pivot close
+            swing_window bars before it is confirmed. "next_open" prices
+            each leg at what its own order type gets.
+        tp1_resting_limit: treat TP1 as a limit order resting at
+            tp1_price, so it fills AT the target rather than a bar late.
+            Only meaningful with exit_fill="next_open" (under "level"
+            every leg already fills at its level). Unlike a limit at the
+            entry, this is not adversely selected -- a sell limit above
+            the market fills exactly when price reaches the target, which
+            is the event being traded. It is off by default because the
+            live bot does not rest one: TP1 sells only part of the
+            position while the stop covers all of it, so the two orders
+            have to be bracketed (OCA) to avoid selling more than is
+            held. Model it before building it.
         exit_fully_at_tp1: sell the ENTIRE position at tp1_price instead of
             tp1_fraction of it, ending the trade there -- no runner, no
             breakeven stop, no new-high exit. This is the exit policy that
@@ -314,6 +375,8 @@ def find_smc_long_trades(
     """
     if entry_fill not in ENTRY_FILLS:
         raise ValueError(f"unknown entry_fill: {entry_fill!r}; expected one of {list(ENTRY_FILLS)}")
+    if exit_fill not in EXIT_FILLS:
+        raise ValueError(f"unknown exit_fill: {exit_fill!r}; expected one of {list(EXIT_FILLS)}")
     opens, highs, lows, closes, dates = bars["open"], bars["high"], bars["low"], bars["close"], bars["date"]
     slip = _normalize_slippage_bps(slippage_bps)
     n = len(closes)
@@ -382,9 +445,15 @@ def find_smc_long_trades(
         if open_trade is not None:
             pos = open_trade
             if lows[i] <= pos["stop_price"]:
+                # The stop rests at the broker, so it triggers intrabar and
+                # fills at its level -- unless the bar OPENED through it, in
+                # which case the level was never on offer and the fill is the
+                # open. That gap is the whole reason a stop is not a
+                # guarantee, and pricing it at the level hid it completely.
+                raw_stop = pos["stop_price"] if exit_fill == "level" else min(pos["stop_price"], opens[i])
                 pos["fills"].append({
                     "idx": i, "date": dates[i],
-                    "price": _slipped(pos["stop_price"], slip["stop"], "sell"),
+                    "price": _slipped(raw_stop, slip["stop"], "sell"),
                     "qty_fraction": pos["remaining_fraction"], "reason": "stop",
                 })
                 trades.append(pos)
@@ -392,9 +461,13 @@ def find_smc_long_trades(
             else:
                 if not pos["tp1_done"] and pos["tp1_price"] is not None and highs[i] >= pos["tp1_price"]:
                     exit_qty = pos["remaining_fraction"] if exit_fully_at_tp1 else tp1_fraction
+                    if exit_fill == "level" or tp1_resting_limit:
+                        tp1_idx, raw_tp1 = i, pos["tp1_price"]
+                    else:
+                        tp1_idx, raw_tp1 = _delayed_exit_fill(opens, closes, dates, i, n)
                     pos["fills"].append({
-                        "idx": i, "date": dates[i],
-                        "price": _slipped(pos["tp1_price"], slip["tp1"], "sell"),
+                        "idx": tp1_idx, "date": dates[tp1_idx],
+                        "price": _slipped(raw_tp1, slip["tp1"], "sell"),
                         "qty_fraction": exit_qty, "reason": "tp1",
                     })
                     pos["remaining_fraction"] = round(pos["remaining_fraction"] - exit_qty, 6)
@@ -414,15 +487,28 @@ def find_smc_long_trades(
                         # this clamp, post_tp1_stop_fraction > 1 books exits at
                         # prices the bars never offered, and the metric improves
                         # monotonically on fills that cannot happen.
-                        pos["stop_price"] = min(new_stop, closes[i])
+                        #
+                        # The reference is the market when the stop is PLACED,
+                        # which is right after the TP1 leg fills -- under "level"
+                        # that is this bar's close, and under a delayed fill it is
+                        # the price that leg actually got.
+                        market_ref = closes[i] if exit_fill == "level" else raw_tp1
+                        pos["stop_price"] = min(new_stop, market_ref)
 
                 # full exit on the first confirmed swing high after entry
                 if open_trade is not None and (pos["tp1_done"] or pos["tp1_price"] is None):
                     for sh_idx, _ in swing_highs:
                         if pos["entry_idx"] < sh_idx <= i and sh_idx + swing_window <= i:
+                            # Bar i is where the pivot becomes CONFIRMED and the
+                            # bot can act on it. Under "level" the fill is booked
+                            # back at the pivot itself, swing_window bars earlier.
+                            if exit_fill == "level":
+                                exit_idx, raw_exit = sh_idx, closes[sh_idx]
+                            else:
+                                exit_idx, raw_exit = _delayed_exit_fill(opens, closes, dates, i, n)
                             pos["fills"].append({
-                                "idx": sh_idx, "date": dates[sh_idx],
-                                "price": _slipped(closes[sh_idx], slip["new_high_exit"], "sell"),
+                                "idx": exit_idx, "date": dates[exit_idx],
+                                "price": _slipped(raw_exit, slip["new_high_exit"], "sell"),
                                 "qty_fraction": pos["remaining_fraction"], "reason": "new_high_exit",
                             })
                             trades.append(pos)
@@ -432,11 +518,12 @@ def find_smc_long_trades(
             if (
                 force_close_same_day
                 and open_trade is not None
-                and (i == n - 1 or dates[i].date() != dates[i + 1].date())
+                and _is_last_bar_of_day(dates, i, n)
             ):
+                raw_close = closes[i] if exit_fill == "level" else opens[i]
                 pos["fills"].append({
                     "idx": i, "date": dates[i],
-                    "price": _slipped(closes[i], slip["same_day_force_close"], "sell"),
+                    "price": _slipped(raw_close, slip["same_day_force_close"], "sell"),
                     "qty_fraction": pos["remaining_fraction"], "reason": "same_day_force_close",
                 })
                 trades.append(pos)

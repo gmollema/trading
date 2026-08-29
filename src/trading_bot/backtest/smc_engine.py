@@ -21,6 +21,7 @@ from trading_bot.backtest import portfolio
 from trading_bot.backtest.data import DAILY_DIR, INTRADAY_DIR, compute_daily_context, load_daily, load_intraday
 from trading_bot.backtest.smc_signals import (
     DEFAULT_ENTRY_FILL,
+    DEFAULT_EXIT_FILL,
     DEFAULT_POST_TP1_STOP_FRACTION,
     DEFAULT_SWING_WINDOW,
     find_smc_long_trades,
@@ -81,6 +82,8 @@ def build_smc_candidates(
     exit_fully_at_tp1: bool = False,
     entry_fill: str = DEFAULT_ENTRY_FILL,
     require_ob_reclaim: bool = False,
+    exit_fill: str = DEFAULT_EXIT_FILL,
+    tp1_resting_limit: bool = False,
 ) -> list[tuple]:
     """Per-symbol signal generation only (see module docstring, phase 1) --
     independent of everything portfolio-level (equity, sizing, concurrency,
@@ -110,7 +113,7 @@ def build_smc_candidates(
         for trade in find_smc_long_trades(
             bars, time_window_bars, tp1_fraction, swing_window, require_confirmed_trend,
             force_close_same_day, slippage_bps, post_tp1_stop_fraction, exit_fully_at_tp1,
-            entry_fill, require_ob_reclaim,
+            entry_fill, require_ob_reclaim, exit_fill, tp1_resting_limit,
         ):
             if uptrend_dates is not None and trade["entry_date"].date() not in uptrend_dates:
                 continue
