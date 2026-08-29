@@ -19,6 +19,7 @@ from pathlib import Path
 
 import pandas as pd
 
+from trading_bot.backtest import engine
 from trading_bot.backtest.engine import run_backtest
 
 DAILY_HISTORY_LEN = 200  # rows needed for a defined SMA200
@@ -418,3 +419,21 @@ class TestRunBacktestConcurrencyCap(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestSlippageNormalisation(unittest.TestCase):
+    def test_none_is_frictionless(self):
+        self.assertEqual(set(engine._normalize_slippage(None).values()), {0.0})
+
+    def test_scalar_applies_to_every_leg(self):
+        self.assertEqual(set(engine._normalize_slippage(5.0).values()), {5.0})
+
+    def test_partial_dict_leaves_the_rest_at_zero(self):
+        slip = engine._normalize_slippage({"entry": 10.0})
+        self.assertEqual(slip["entry"], 10.0)
+        self.assertEqual(slip["stop"], 0.0)
+
+    def test_unknown_reason_is_rejected(self):
+        """A typo would otherwise read as "no slippage on that leg"."""
+        with self.assertRaises(ValueError):
+            engine._normalize_slippage({"tp1": 10.0})  # an SMC reason, not a gap-and-go one

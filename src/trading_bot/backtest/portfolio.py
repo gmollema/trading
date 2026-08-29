@@ -206,12 +206,59 @@ def open_position(symbol: str, price: float, today_lod: float, qty: int) -> dict
     }
 
 
-def manage_position(pos: dict, bar: dict, recent_lows: list[float], exit_cfg: dict) -> tuple[dict | None, list[dict]]:
+# Where each leg of a gap-and-go trade actually fills.
+#
+# "level" is what this module has always done: book the trigger as the
+# fill. The stop nearly earns that -- it rests at IBKR as a real StopOrder
+# (cycle._place_stop) and triggers intrabar -- but the partial profit,
+# the force-close and the max-hold exit are MarketOrders the bot only
+# sends after a bar has closed and told it something happened, and the
+# entry is a market order sent on a signal computed from the last bar.
+#
+# "next_open" prices each leg at what its own order type gets:
+#
+#   stop            still at its level, except on a bar that OPENED
+#                   through it -- there the level was never on offer.
+#   partial_profit  the open of the bar after the trigger.
+#   force_close /   likewise. The cycle acts on a closed bar, so the
+#   max_hold        earliest fill is the next one.
+#
+# When no same-session bar follows, the market order still executes at
+# that bar's close: an exit is not optional the way an entry is.
+#
+# This mirrors backtest/smc_signals.py's ENTRY_FILLS/EXIT_FILLS, which
+# the SMC strategy went through on 2026-08-29. Same defect, same fix.
+FILL_SPECS = ("level", "next_open")
+DEFAULT_FILL_SPEC = "level"
+
+
+def slipped(price: float, bps: float, side: str) -> float:
+    """Move `price` adversely by `bps`: a buy fills higher, a sell lower."""
+    if not bps:
+        return price
+    factor = 1.0 + bps / 10_000.0 if side == "buy" else 1.0 - bps / 10_000.0
+    return price * factor
+
+
+def manage_position(
+    pos: dict,
+    bar: dict,
+    recent_lows: list[float],
+    exit_cfg: dict,
+    fill_spec: str = DEFAULT_FILL_SPEC,
+) -> tuple[dict | None, list[dict]]:
     """Evaluate one bar (open/high/low/close) against an open position.
 
     Args:
         pos: an open-position record (see `open_position`).
-        bar: {"low", "close"} for the current bar.
+        bar: {"low", "close"} for the current bar, plus "open" and
+            "next_open" when fill_spec is "next_open" -- "open" to price a
+            stop the bar gapped straight through, "next_open" because a
+            market order sent once this bar closes fills on the following
+            one. "next_open" may be NaN/None on a day's last bar, which
+            means the order executes at this close instead.
+        fill_spec: see FILL_SPECS. "level" (the default) keeps the
+            historical behaviour of booking every trigger as its own fill.
         recent_lows: that symbol's Low prices from today's session open
             through this bar inclusive -- used only in the post_breakeven
             trailing-stop branch (compute_swing_lows needs 2 bars on each
@@ -228,7 +275,13 @@ def manage_position(pos: dict, bar: dict, recent_lows: list[float], exit_cfg: di
 
     stop_price = pos["current_stop_price"]
     if bar["low"] <= stop_price:
-        fills.append({"qty": pos["qty"], "price": stop_price, "reason": "stop"})
+        # A bar that OPENED under the stop never offered the level. That
+        # gap is the entire reason a stop is not a guarantee, and pricing
+        # it at the level hid it completely.
+        raw = stop_price
+        if fill_spec != "level" and bar.get("open") is not None:
+            raw = min(stop_price, float(bar["open"]))
+        fills.append({"qty": pos["qty"], "price": raw, "reason": "stop"})
         return None, fills
 
     entry_price = pos["entry_price"]
@@ -246,7 +299,11 @@ def manage_position(pos: dict, bar: dict, recent_lows: list[float], exit_cfg: di
 
         if reached_partial:
             partial_qty = min(math.ceil(pos["qty"] * partial_fraction), pos["qty"])
-            fills.append({"qty": partial_qty, "price": price, "reason": "partial_profit"})
+            fills.append({
+                "qty": partial_qty,
+                "price": market_fill_price(bar, fill_spec),
+                "reason": "partial_profit",
+            })
             remaining_qty = pos["qty"] - partial_qty
             if remaining_qty <= 0:
                 return None, fills
@@ -273,6 +330,24 @@ def manage_position(pos: dict, bar: dict, recent_lows: list[float], exit_cfg: di
                 pos = {**pos, "current_stop_price": candidate_stop}
 
     return pos, fills
+
+
+def market_fill_price(bar: dict, fill_spec: str = DEFAULT_FILL_SPEC) -> float:
+    """What a market order decided on `bar` actually fills at.
+
+    Under "level" that is the bar's own close, which is what the strategy
+    was scored on and what nothing can execute -- the bot only learns the
+    bar closed after it closed. Under "next_open" it is the following
+    bar's open, falling back to this close when the session ends here,
+    since an exit still has to happen.
+    """
+    close = float(bar["close"])
+    if fill_spec == "level":
+        return close
+    nxt = bar.get("next_open")
+    if nxt is None or nxt != nxt:  # NaN: no same-session bar follows
+        return close
+    return float(nxt)
 
 
 def close_position(pos: dict, price: float, reason: str = "force_close") -> dict:

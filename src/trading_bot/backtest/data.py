@@ -136,6 +136,12 @@ def build_symbol_frame(
     intraday_ctx = compute_intraday_context(intraday_df, rvol_lookback_days)
     merged = intraday_ctx.merge(daily_lookup, on="trading_date", how="left")
     merged["symbol"] = ticker
+    # The price a market order sent at this bar's close actually gets.
+    # NaN on a day's last bar, which is the honest answer: nothing rests
+    # overnight and this strategy flattens daily, so there is no same-
+    # session bar left to fill on. Computed here because it is a fact
+    # about the bars, not about any strategy reading them.
+    merged["next_open"] = merged.groupby("trading_date")["open"].shift(-1)
     return merged
 
 

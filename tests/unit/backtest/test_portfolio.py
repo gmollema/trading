@@ -306,3 +306,88 @@ class TestClosePosition(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestMarketFillPrice(unittest.TestCase):
+    """What a market order decided on a bar actually fills at. Under
+    "level" it books the very close it was decided on, which is the bar
+    the bot only learns about once it has closed."""
+
+    def test_level_books_this_bars_close(self):
+        bar = {"close": 100.0, "next_open": 101.0}
+        self.assertEqual(portfolio.market_fill_price(bar, "level"), 100.0)
+
+    def test_next_open_books_the_following_bar(self):
+        bar = {"close": 100.0, "next_open": 101.0}
+        self.assertEqual(portfolio.market_fill_price(bar, "next_open"), 101.0)
+
+    def test_falls_back_to_this_close_at_a_session_end(self):
+        """An exit still has to happen -- it is not optional the way an
+        entry is -- so the order goes in at this close instead."""
+        self.assertEqual(portfolio.market_fill_price({"close": 100.0, "next_open": float("nan")},
+                                                     "next_open"), 100.0)
+        self.assertEqual(portfolio.market_fill_price({"close": 100.0}, "next_open"), 100.0)
+
+    def test_default_is_the_historical_behaviour(self):
+        self.assertEqual(portfolio.market_fill_price({"close": 100.0, "next_open": 101.0}), 100.0)
+
+
+class TestSlipped(unittest.TestCase):
+    def test_a_buy_fills_higher_and_a_sell_lower(self):
+        self.assertAlmostEqual(portfolio.slipped(100.0, 100.0, "buy"), 101.0)
+        self.assertAlmostEqual(portfolio.slipped(100.0, 100.0, "sell"), 99.0)
+
+    def test_zero_is_a_no_op(self):
+        self.assertEqual(portfolio.slipped(100.0, 0.0, "buy"), 100.0)
+
+
+class TestManagePositionFillSpec(unittest.TestCase):
+    """The stop rests at the broker and earns its level; the partial
+    profit is a market order sent after the bar closes and does not."""
+
+    def _pos(self, qty=90, entry=100.0, stop=95.0):
+        pos = portfolio.open_position("AAA", entry, stop / 0.99, qty)
+        pos["current_stop_price"] = stop
+        return pos
+
+    EXIT_CFG = {"partial_profit_trigger_R": 0.75, "breakeven_trigger_R": 1.0,
+                "partial_profit_fraction": 1 / 3}
+
+    def test_stop_keeps_its_level_when_the_bar_opened_above_it(self):
+        bar = {"open": 99.0, "low": 94.0, "close": 96.0, "next_open": 96.5}
+        _, fills = portfolio.manage_position(self._pos(), bar, [], self.EXIT_CFG, "next_open")
+        self.assertEqual(fills[0]["reason"], "stop")
+        self.assertEqual(fills[0]["price"], 95.0)
+
+    def test_stop_that_gapped_through_fills_at_the_open(self):
+        """The level was never on offer -- which is the entire reason a
+        stop is not a guarantee, and pricing it at the level hid it."""
+        bar = {"open": 90.0, "low": 89.0, "close": 91.0, "next_open": 91.5}
+        _, fills = portfolio.manage_position(self._pos(), bar, [], self.EXIT_CFG, "next_open")
+        self.assertEqual(fills[0]["price"], 90.0)
+
+    def test_the_gap_is_invisible_under_the_level_spec(self):
+        bar = {"open": 90.0, "low": 89.0, "close": 91.0, "next_open": 91.5}
+        _, fills = portfolio.manage_position(self._pos(), bar, [], self.EXIT_CFG, "level")
+        self.assertEqual(fills[0]["price"], 95.0)
+
+    def test_partial_profit_fills_on_the_following_bar(self):
+        pos = self._pos()
+        bar = {"open": 103.0, "low": 102.0, "close": 104.0, "next_open": 103.5}
+        _, fills = portfolio.manage_position(pos, bar, [], self.EXIT_CFG, "next_open")
+        self.assertEqual(fills[0]["reason"], "partial_profit")
+        self.assertEqual(fills[0]["price"], 103.5)
+
+    def test_partial_profit_books_its_trigger_under_the_level_spec(self):
+        pos = self._pos()
+        bar = {"open": 103.0, "low": 102.0, "close": 104.0, "next_open": 103.5}
+        _, fills = portfolio.manage_position(pos, bar, [], self.EXIT_CFG, "level")
+        self.assertEqual(fills[0]["price"], 104.0)
+
+    def test_the_trigger_itself_is_unchanged_by_the_fill_spec(self):
+        """Only the recorded price moves; what fires stays what fires."""
+        pos = self._pos()
+        bar = {"open": 103.0, "low": 102.0, "close": 104.0, "next_open": 103.5}
+        for spec in ("level", "next_open"):
+            _, fills = portfolio.manage_position(pos, bar, [], self.EXIT_CFG, spec)
+            self.assertEqual([f["reason"] for f in fills], ["partial_profit"], spec)

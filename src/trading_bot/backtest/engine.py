@@ -108,6 +108,24 @@ def build_day_frames(universe: pd.DataFrame) -> dict[tuple[str, object], pd.Data
     }
 
 
+SLIPPAGE_REASONS = ("entry", "stop", "partial_profit", "force_close",
+                    "max_hold_reached", "end_of_data")
+
+
+def _normalize_slippage(slippage_bps: dict | float | None) -> dict:
+    """Accept None, a scalar for every leg, or a partial dict keyed by
+    fill reason. Unknown keys are rejected rather than ignored -- a typo'd
+    reason would otherwise read as "no slippage on that leg"."""
+    if slippage_bps is None:
+        return {r: 0.0 for r in SLIPPAGE_REASONS}
+    if isinstance(slippage_bps, (int, float)):
+        return {r: float(slippage_bps) for r in SLIPPAGE_REASONS}
+    unknown = set(slippage_bps) - set(SLIPPAGE_REASONS)
+    if unknown:
+        raise ValueError(f"unknown slippage_bps keys: {sorted(unknown)}; expected {list(SLIPPAGE_REASONS)}")
+    return {r: float(slippage_bps.get(r, 0.0)) for r in SLIPPAGE_REASONS}
+
+
 def _trade_row(
     timestamp, symbol: str, side: str, qty: float, price: float, order_id: int, reason=None, r_multiple=None
 ) -> dict:
@@ -142,6 +160,10 @@ def run_backtest(
     overnight_size_reduction_pct: float | None = None,
     universe: pd.DataFrame | None = None,
     day_frames: dict[tuple[str, object], pd.DataFrame] | None = None,
+    fill_spec: str = portfolio.DEFAULT_FILL_SPEC,
+    slippage_bps: dict | float | None = None,
+    commission_per_share: float | None = None,
+    commission_min: float = portfolio.DEFAULT_COMMISSION_MIN,
 ) -> dict:
     """Simulate rules.json's strategy across `tickers`' cached history.
 
@@ -157,6 +179,23 @@ def run_backtest(
     overnight (i.e. always empty when force_close_daily=True).
 
     Args:
+        fill_spec: where each leg fills -- see portfolio.FILL_SPECS.
+            "level" (the default) is what every gap-and-go figure in this
+            repo was produced on: the entry books the signal bar's own
+            close, and the market-order exits book theirs. Nothing
+            executes either. "next_open" prices each leg at what its own
+            order type gets, the same correction backtest/smc_signals.py
+            went through on 2026-08-29.
+        slippage_bps: adverse slippage per leg -- None or 0 for the
+            frictionless fills this engine has always assumed, a scalar
+            for one rate everywhere, or a dict keyed by fill reason
+            ("entry", "stop", "partial_profit", "force_close",
+            "max_hold_reached", "end_of_data"). Levels still TRIGGER
+            unchanged; only the recorded fill price moves, adversely.
+        commission_per_share / commission_min: IBKR's whole-share
+            schedule, charged once per fill. Left None (the default), no
+            commission is modelled at all -- which is what every figure
+            this engine has produced so far assumed.
         force_close_daily: when True (the live bot's actual behavior),
             every open position is flattened once the force-close time
             (rules.json's time_filter.force_close_et) is reached each day.
@@ -215,6 +254,13 @@ def run_backtest(
         day_frames = build_day_frames(universe)
 
     equity = float(initial_capital)
+    slip = _normalize_slippage(slippage_bps)
+
+    def _charge(qty: float) -> float:
+        if commission_per_share is None:
+            return 0.0
+        return portfolio.commission(qty, commission_per_share, commission_min)
+
     open_positions: dict[str, dict] = {}
     trades: list[dict] = []
     equity_curve: list[dict] = []
@@ -282,7 +328,10 @@ def run_backtest(
             pos = open_positions[symbol]
 
             if max_hold_days is not None and (trading_date - pos["entry_date"]).days >= max_hold_days:
-                price = float(bar["close"])
+                price = portfolio.slipped(
+                    portfolio.market_fill_price(bar, fill_spec),
+                    slip.get("max_hold_reached", 0.0), "sell",
+                )
                 fill = portfolio.close_position(pos, price, reason="max_hold_reached")
                 order_id += 1
                 equity += (fill["price"] - pos["entry_price"]) * fill["qty"]
@@ -299,11 +348,19 @@ def run_backtest(
             recent_lows = day_frame.loc[:timestamp, "low"].tolist()
 
             updated_pos, fills = portfolio.manage_position(
-                pos, {"low": float(bar["low"]), "close": float(bar["close"])}, recent_lows, rules["exit"]
+                pos,
+                {
+                    "low": float(bar["low"]), "close": float(bar["close"]),
+                    "open": float(bar["open"]), "next_open": bar["next_open"],
+                },
+                recent_lows,
+                rules["exit"],
+                fill_spec,
             )
             for fill in fills:
                 order_id += 1
-                equity += (fill["price"] - pos["entry_price"]) * fill["qty"]
+                fill["price"] = portfolio.slipped(fill["price"], slip.get(fill["reason"], 0.0), "sell")
+                equity += (fill["price"] - pos["entry_price"]) * fill["qty"] - _charge(fill["qty"])
                 r_multiple = (fill["price"] - pos["entry_price"]) / pos["R"] if pos["R"] else None
                 trades.append(
                     _trade_row(
@@ -324,7 +381,10 @@ def run_backtest(
                 if day_frame is None or timestamp not in day_frame.index:
                     continue
                 pos = open_positions.pop(symbol)
-                price = float(day_frame.loc[timestamp, "close"])
+                price = portfolio.slipped(
+                    portfolio.market_fill_price(day_frame.loc[timestamp], fill_spec),
+                    slip.get("force_close", 0.0), "sell",
+                )
                 fill = portfolio.close_position(pos, price)
                 order_id += 1
                 equity += (fill["price"] - pos["entry_price"]) * fill["qty"]
@@ -348,13 +408,30 @@ def run_backtest(
                     break
 
                 symbol = row["symbol"]
-                price = float(row["close"])
                 today_lod = float(row["running_lod"])
                 initial_stop = portfolio.initial_stop_from_lod(today_lod)
+
+                # The signal is computed from this bar; the order goes in
+                # once it closes and fills on the next one. Under "level"
+                # that distinction is erased and the entry books the very
+                # close it was decided on.
+                raw_entry = portfolio.market_fill_price(row, fill_spec)
+                if raw_entry != raw_entry:  # no same-session bar to fill on
+                    continue
+                price = portfolio.slipped(raw_entry, slip.get("entry", 0.0), "buy")
+                if price <= initial_stop:
+                    # No positive risk-per-share to size against. Live this
+                    # is a fill followed at once by a stop-out rather than a
+                    # skipped trade -- the one place this model flatters
+                    # itself, and only reachable once the fill is priced off
+                    # a later bar than the signal.
+                    continue
+
                 size = portfolio.position_size(equity, risk_pct, price, initial_stop, max_position_pct)
                 if size < 1:
                     continue
 
+                equity -= _charge(size)
                 new_pos = portfolio.open_position(symbol, price, today_lod, size)
                 new_pos["entry_date"] = trading_date
                 open_positions[symbol] = new_pos
@@ -375,7 +452,9 @@ def run_backtest(
         if symbol_rows.empty:
             continue
         last_row = symbol_rows.iloc[-1]
-        fill = portfolio.close_position(pos, float(last_row["close"]), reason="end_of_data")
+        fill = portfolio.close_position(
+            pos, float(last_row["close"]), reason="end_of_data",
+        )
         order_id += 1
         equity += (fill["price"] - pos["entry_price"]) * fill["qty"]
         r_multiple = (fill["price"] - pos["entry_price"]) / pos["R"] if pos["R"] else None
