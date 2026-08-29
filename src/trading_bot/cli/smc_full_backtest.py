@@ -36,6 +36,16 @@ way, with the new-high exit the worst of the three (it fired on a
 confirmed pivot but filled at that pivot's own close, swing_window bars
 earlier). See leg_slippage.
 
+It also runs under the constraints the live bot actually operates within,
+which no harness in this repo did before 2026-08-29: positions flattened
+same-day (time_filter.force_close_et), entries only inside the scan window
+(time_filter.earliest/latest_entry_et), and a universe limited to the
+morning watchlist cli/smc_prefilter.py would have written that day
+(universe.*, ~40 names out of 503). Those three cost more than every
+execution-spec correction put together -- see smc_live_parity, which walks
+them one at a time. --harness-basis drops them, for reproducing the older
+figures rather than for producing new ones.
+
 Candidates are rebuilt only when slippage changes, since commission is
 applied at portfolio level and cannot affect signal generation.
 
@@ -54,7 +64,12 @@ from pathlib import Path
 import pandas as pd
 
 from trading_bot import smc_live
-from trading_bot.backtest.smc_engine import build_smc_candidates, simulate_smc_portfolio
+from trading_bot.backtest.data import DAILY_DIR
+from trading_bot.backtest.smc_engine import (
+    build_smc_candidates,
+    simulate_smc_portfolio,
+    watchlist_from_rules,
+)
 from trading_bot.backtest.smc_signals import DEFAULT_EXIT_FILL
 from trading_bot.cli.smc_rr_walkforward import (
     DEFAULT_BOUNDARIES,
@@ -79,6 +94,7 @@ ENTRY_SLIPPAGE_BPS = MARKET_LEG_SLIPPAGE_BPS  # assumed, not measured
 # evidence for the remainder -- a market execution that does not chase,
 # measured 0-5.9 bps over 7 live fills, median 2.0.
 RESIDUAL_ENTRY_SLIPPAGE_BPS = STOP_SLIPPAGE_BPS
+
 
 def leg_slippage(entry_fill: str, exit_fill: str, tp1_resting_limit: bool = False) -> dict:
     """Per-leg slippage for the execution spec in force.
@@ -193,7 +209,11 @@ def run_one(candidates, rules, initial_capital, commission, lo=None, hi=None) ->
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     parser.add_argument("--intraday-dir", type=Path, default=Path("backtest_data/intraday_5m"))
+    parser.add_argument("--daily-dir", type=Path, default=DAILY_DIR)
     parser.add_argument("--rules", type=Path, default=Path("smc_rules.json"))
+    parser.add_argument("--harness-basis", action="store_true",
+                        help="drop the live bot's same-day close, entry window and daily "
+                             "watchlist -- the pre-2026-08-29 basis, for reproducing old figures")
     parser.add_argument("--initial-capital", type=float, default=DEFAULT_INITIAL_CAPITAL)
     parser.add_argument("--fit-start", type=str, default=DEFAULT_FIT_START)
     parser.add_argument("--boundaries", type=str, default=",".join(DEFAULT_BOUNDARIES))
@@ -220,6 +240,25 @@ def main() -> int:
     print(f"exit spec:  fill={exit_['fill']} tp1_resting_limit={exit_['tp1_resting_limit']}", flush=True)
     print(f"slippage:   {leg_slippage(entry['fill'], exit_['fill'], exit_['tp1_resting_limit'])}", flush=True)
 
+    # The watchlist is screened over the WHOLE index even when --tickers
+    # narrows the simulation: the 40-name cap is a global ranking, and
+    # computing it from a subset would hand that subset slots the live bot
+    # never had.
+    live_constraints = {}
+    if not args.harness_basis:
+        tf = rules.get("time_filter") or {}
+        print("rebuilding the daily watchlist...", flush=True)
+        live_constraints = {
+            "force_close_same_day": True,
+            "entry_window_et": (tf.get("earliest_entry_et"), tf.get("latest_entry_et")),
+            "daily_watchlist": watchlist_from_rules(list(SP500_TICKERS), args.daily_dir, rules),
+        }
+        print(f"live basis: force-close on, entries {tf.get('earliest_entry_et')}-"
+              f"{tf.get('latest_entry_et')} ET, "
+              f"{len(live_constraints['daily_watchlist'])} watchlist dates", flush=True)
+    else:
+        print("harness basis: no same-day close, no entry window, full index", flush=True)
+
     # Build once per distinct slippage setting, not once per cost basis.
     candidates_by_slippage = {}
     for key, slippage in group_by_slippage(cost_bases).items():
@@ -235,6 +274,7 @@ def main() -> int:
             require_ob_reclaim=entry["require_ob_reclaim"],
             exit_fill=exit_["fill"],
             tp1_resting_limit=exit_["tp1_resting_limit"],
+            **live_constraints,
         )
         print(f"  {len(candidates_by_slippage[key])} candidates", flush=True)
 
@@ -245,7 +285,7 @@ def main() -> int:
 
         tagged = {"entry_fill": entry["fill"], "require_ob_reclaim": entry["require_ob_reclaim"],
                   "exit_fill": exit_["fill"], "tp1_resting_limit": exit_["tp1_resting_limit"],
-                  "basis": basis["name"]}
+                  "live_constraints": bool(live_constraints), "basis": basis["name"]}
 
         full = run_one(cands, rules, args.initial_capital, basis["commission"])
         if full:

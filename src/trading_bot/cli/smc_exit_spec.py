@@ -175,8 +175,11 @@ def main() -> int:
           "and new_high_exit filled at a pivot close swing_window bars before it could be known.")
     print("next_open_tp1_limit describes a bot that does not exist yet -- it needs OCA bracketing, "
           "since TP1 sells part of a position the stop covers all of.")
-    print("Caveat unchanged from smc_entry_spec: these runs leave force_close_same_day off and "
-          "skip the daily_trend_filter, while the live bot does both.")
+    print("Caveat, now a frozen one: these runs leave force_close_same_day off, take entries "
+          "outside the bot's scan window, and screen no daily watchlist. That divergence is fixed "
+          "in smc_full_backtest and measured in smc_live_parity, and deliberately NOT backported "
+          "here -- re-running this reproduces its committed numbers rather than quietly answering "
+          "a different question.")
     print(f"\nwrote {args.out}")
     return 0
 
