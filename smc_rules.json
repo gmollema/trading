@@ -7,6 +7,11 @@
     "fill": "next_open",
     "require_ob_reclaim": true
   },
+  "exit": {
+    "_note": "Respecified 2026-08-29, same defect as the entry: each exit booked its own trigger as its fill. new_high_exit was the worst thing in the strategy -- it fires only once a swing high is CONFIRMED, which takes swing_window (20) bars, then filled at that pivot bar's own close, so it sold at a local peak with 100 minutes of hindsight. fill='next_open' prices each leg at what its own order type gets: the stop keeps its level because it rests at IBKR and triggers intrabar (but a bar that OPENS through it now fills at that open), while tp1, new_high_exit and same_day_force_close fill on the bar after the closed bar that revealed them, which is what the bot's market orders actually get. No live change was needed -- the bot already did all of this; the backtest was the thing that was wrong. Out-of-sample this cuts the zero-cost figure from +21.3% to +9.5% (the hindsight) while RAISING the measured-slippage figure from -1.8% to +6.1% (the 64 bps blanket was over-charging legs whose delay is now read off the bars), and the three cost bases converge instead of diverging. tp1_resting_limit models a bracketed take-profit resting at the target, which the bot does NOT have; measured at +5.8% OOS against +6.1% without it, so the OCA plumbing is not worth building. Keep it false unless that order is actually placed -- setting it true without building it puts the backtest back to scoring fills nobody gets. See smc_exit_spec_results.csv.",
+    "fill": "next_open",
+    "tp1_resting_limit": false
+  },
   "swing_window": 20,
   "time_window_bars": 33,
   "tp1_fraction": 0.25,

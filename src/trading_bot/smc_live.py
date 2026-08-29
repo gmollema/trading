@@ -23,7 +23,12 @@ from pathlib import Path
 import pandas as pd
 
 from trading_bot.backtest import portfolio
-from trading_bot.backtest.smc_signals import DEFAULT_ENTRY_FILL, ENTRY_FILLS
+from trading_bot.backtest.smc_signals import (
+    DEFAULT_ENTRY_FILL,
+    DEFAULT_EXIT_FILL,
+    ENTRY_FILLS,
+    EXIT_FILLS,
+)
 
 SMC_RULES_PATH = Path("smc_rules.json")
 SMC_WATCHLIST_PATH = Path("smc_watchlist.txt")
@@ -62,6 +67,31 @@ def entry_rules(rules: dict) -> dict:
     if spec["fill"] not in ENTRY_FILLS:
         raise ValueError(f"unknown entry fill: {spec['fill']!r}; expected one of {list(ENTRY_FILLS)}")
     return {"fill": spec["fill"], "require_ob_reclaim": bool(spec["require_ob_reclaim"])}
+
+
+DEFAULT_EXIT_RULES = {"fill": DEFAULT_EXIT_FILL, "tp1_resting_limit": False}
+
+
+def exit_rules(rules: dict) -> dict:
+    """The exit specification from a rules dict, defaults filled in.
+
+    Backtest-side only, unlike entry_rules: every leg it describes is
+    already what the live bot does. The stop rests at IBKR, and TP1 and
+    the new-high exit are market orders sent once a closed bar reveals
+    the trigger. What was wrong was the backtest, which booked each
+    trigger as its own fill -- so this configures the model to match the
+    bot rather than asking the bot to change.
+
+    tp1_resting_limit is the one exception and is the reason this is
+    configurable at all: it describes a bot that does NOT exist yet, one
+    resting a bracketed take-profit at the target. Setting it true without
+    building that would put the backtest back to scoring fills nobody
+    gets, which is the whole failure being corrected here.
+    """
+    spec = {**DEFAULT_EXIT_RULES, **(rules.get("exit") or {})}
+    if spec["fill"] not in EXIT_FILLS:
+        raise ValueError(f"unknown exit fill: {spec['fill']!r}; expected one of {list(EXIT_FILLS)}")
+    return {"fill": spec["fill"], "tp1_resting_limit": bool(spec["tp1_resting_limit"])}
 
 
 def get_market_status(now_et: datetime, rules: dict) -> str:

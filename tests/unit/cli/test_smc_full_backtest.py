@@ -68,35 +68,71 @@ class CostBasesTest(unittest.TestCase):
         self.assertLess(f.TIERED[1], f.FIXED[1])
 
 
-class EntrySlippageForSpecTest(unittest.TestCase):
+class LegSlippageTest(unittest.TestCase):
     """The chase is either modelled by the fill bar or charged as bps, and
-    charging both bills the same 5-minute delay twice."""
+    charging both bills the same delay twice -- per leg, since the legs do
+    not all chase."""
 
-    def test_level_spec_pays_the_full_market_leg_rate(self):
-        self.assertEqual(f.entry_slippage_bps("level"), f.MARKET_LEG_SLIPPAGE_BPS)
+    def test_level_specs_pay_the_full_market_leg_rate(self):
+        slip = f.leg_slippage("level", "level")
+        for leg in ("entry", "tp1", "new_high_exit", "same_day_force_close"):
+            self.assertEqual(slip[leg], f.MARKET_LEG_SLIPPAGE_BPS, leg)
 
     def test_next_bar_specs_pay_only_the_residual(self):
-        self.assertEqual(f.entry_slippage_bps("next_open"), f.RESIDUAL_ENTRY_SLIPPAGE_BPS)
-        self.assertEqual(f.entry_slippage_bps("next_high"), f.RESIDUAL_ENTRY_SLIPPAGE_BPS)
+        slip = f.leg_slippage("next_open", "next_open")
+        for leg in ("entry", "tp1", "new_high_exit", "same_day_force_close"):
+            self.assertEqual(slip[leg], f.RESIDUAL_ENTRY_SLIPPAGE_BPS, leg)
         self.assertLess(f.RESIDUAL_ENTRY_SLIPPAGE_BPS, f.MARKET_LEG_SLIPPAGE_BPS)
 
-    def test_cost_bases_substitute_the_entry_rate_and_nothing_else(self):
-        bases = {b["name"]: b for b in f.cost_bases_for("next_open")}
+    def test_the_two_sides_are_set_independently(self):
+        slip = f.leg_slippage("next_open", "level")
+        self.assertEqual(slip["entry"], f.RESIDUAL_ENTRY_SLIPPAGE_BPS)
+        self.assertEqual(slip["tp1"], f.MARKET_LEG_SLIPPAGE_BPS)
+
+    def test_the_stop_never_chases(self):
+        """It rests at the broker, so its rate does not depend on either
+        spec -- what beats it is a gap, which is priced from the bar."""
+        for entry_fill in ("level", "next_open"):
+            for exit_fill in ("level", "next_open"):
+                self.assertEqual(
+                    f.leg_slippage(entry_fill, exit_fill)["stop"], f.STOP_SLIPPAGE_BPS,
+                )
+
+    def test_a_resting_tp1_limit_gives_up_nothing(self):
+        """A sell limit fills at its price or better."""
+        self.assertEqual(f.leg_slippage("next_open", "next_open", True)["tp1"], 0.0)
+        self.assertEqual(
+            f.leg_slippage("next_open", "next_open", True)["new_high_exit"],
+            f.RESIDUAL_ENTRY_SLIPPAGE_BPS,
+        )
+
+    def test_measured_slippage_is_the_all_level_basis(self):
+        """The constant the historical figures were produced against."""
+        self.assertEqual(f.MEASURED_SLIPPAGE, f.leg_slippage("level", "level"))
+
+
+class CostBasesForTest(unittest.TestCase):
+    def test_rates_follow_the_spec_in_force(self):
+        bases = {b["name"]: b for b in f.cost_bases_for("next_open", "next_open")}
         realistic = bases["realistic_tiered"]["slippage"]
         self.assertEqual(realistic["entry"], f.RESIDUAL_ENTRY_SLIPPAGE_BPS)
-        self.assertEqual(realistic["tp1"], f.MEASURED_SLIPPAGE["tp1"])
-        self.assertEqual(realistic["stop"], f.MEASURED_SLIPPAGE["stop"])
+        self.assertEqual(realistic["new_high_exit"], f.RESIDUAL_ENTRY_SLIPPAGE_BPS)
         self.assertEqual(bases["realistic_tiered"]["commission"], f.TIERED)
 
     def test_zero_cost_stays_costless_under_every_spec(self):
         """It exists to isolate the fill respec from the cost overlay."""
-        for fill in ("level", "next_open", "next_high"):
-            bases = {b["name"]: b for b in f.cost_bases_for(fill)}
-            self.assertIsNone(bases["zero_cost"]["slippage"])
+        for entry_fill in ("level", "next_open"):
+            for exit_fill in ("level", "next_open"):
+                bases = {b["name"]: b for b in f.cost_bases_for(entry_fill, exit_fill)}
+                self.assertIsNone(bases["zero_cost"]["slippage"])
+
+    def test_defaults_reproduce_the_historical_basis(self):
+        bases = {b["name"]: b for b in f.cost_bases_for("level")}
+        self.assertEqual(bases["realistic_tiered"]["slippage"], f.MEASURED_SLIPPAGE)
 
     def test_the_module_constant_is_not_mutated(self):
-        f.cost_bases_for("next_open")
-        self.assertEqual(f.MEASURED_SLIPPAGE["entry"], f.MARKET_LEG_SLIPPAGE_BPS)
+        f.cost_bases_for("next_open", "next_open", True)
+        self.assertEqual(f.MEASURED_SLIPPAGE["tp1"], f.MARKET_LEG_SLIPPAGE_BPS)
 
 
 class RunOneTest(unittest.TestCase):

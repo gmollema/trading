@@ -38,7 +38,11 @@ The exit legs are NOT respecified here and still carry the full market-leg
 rate in the realistic bases. TP1 and the new-high exit have exactly the
 same defect as the old entry -- they fill at a level the bot only learns
 about after the bar closes -- so those rows stay conservative on the exits
-while the entry question is settled.
+while the entry question is settled. That is deliberately left frozen even
+though the exits HAVE since been respecified (smc_exit_spec): this module
+holds every other axis fixed at what it was when its results file was
+written, so re-running it reproduces those numbers rather than silently
+answering a different question.
 
 Usage:
     python -m trading_bot.cli.smc_entry_spec \

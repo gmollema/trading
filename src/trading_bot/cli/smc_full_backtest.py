@@ -8,11 +8,15 @@ stop sits 17.3 bps from entry, while live market-order fills measured 48.5
 and 79.4 bps adverse on TP1. Costs here are the same order as the edge, so
 they decide the answer rather than trimming it.
 
-So this runs the SAME data across several cost bases side by side. The
-zero-cost row is kept only for comparability with the historical numbers,
-NOT because any order type can achieve it -- see smc_fill_model, which
-found a limit at ob_high fills just 31-42% of signals and almost only when
-the setup is failing.
+So this runs the SAME data across several cost bases side by side, on the
+execution spec smc_rules.json configures. Note what zero_cost means now
+that the fills themselves are reachable: it keeps the configured fill
+PRICES and drops only commission and the residual spread, so the gap to
+the realistic rows is the cost overlay by itself. Under the old spec that
+row also assumed a fill price nothing could get -- a limit at ob_high
+fills 31-42% of signals and almost only when the setup is failing
+(smc_fill_model) -- which made it uninterpretable rather than merely
+optimistic.
 
 Slippage is applied per leg rather than as one rate, because the legs
 differ by order type. The stop rests at IBKR as a real StopOrder and
@@ -26,8 +30,11 @@ here. Under the old "level" spec it borrowed TP1's 64 bps, since it was
 the same order type chasing the same kind of level. Under a next-bar fill
 the chase is read off the bars instead, so only spread and impact are left
 to charge -- see RESIDUAL_ENTRY_SLIPPAGE_BPS. Charging both would bill the
-same delay twice. The exits keep the full rate either way: they have the
-same defect the entry had and have not been respecified.
+same delay twice. The exit legs are set the same way from the rules
+file's exit spec -- they had the same defect and it is fixed the same
+way, with the new-high exit the worst of the three (it fired on a
+confirmed pivot but filled at that pivot's own close, swing_window bars
+earlier). See leg_slippage.
 
 Candidates are rebuilt only when slippage changes, since commission is
 applied at portfolio level and cannot affect signal generation.
@@ -48,6 +55,7 @@ import pandas as pd
 
 from trading_bot import smc_live
 from trading_bot.backtest.smc_engine import build_smc_candidates, simulate_smc_portfolio
+from trading_bot.backtest.smc_signals import DEFAULT_EXIT_FILL
 from trading_bot.cli.smc_rr_walkforward import (
     DEFAULT_BOUNDARIES,
     DEFAULT_FIT_START,
@@ -72,14 +80,38 @@ ENTRY_SLIPPAGE_BPS = MARKET_LEG_SLIPPAGE_BPS  # assumed, not measured
 # measured 0-5.9 bps over 7 live fills, median 2.0.
 RESIDUAL_ENTRY_SLIPPAGE_BPS = STOP_SLIPPAGE_BPS
 
-MEASURED_SLIPPAGE = {
-    "entry": ENTRY_SLIPPAGE_BPS,
-    "stop": STOP_SLIPPAGE_BPS,
-    "tp1": MARKET_LEG_SLIPPAGE_BPS,
-    "new_high_exit": MARKET_LEG_SLIPPAGE_BPS,
-    "same_day_force_close": MARKET_LEG_SLIPPAGE_BPS,
-    "end_of_data": 0.0,
-}
+def leg_slippage(entry_fill: str, exit_fill: str, tp1_resting_limit: bool = False) -> dict:
+    """Per-leg slippage for the execution spec in force.
+
+    Each leg is charged the rate its own order type gives up, and only
+    what the fill model has not already accounted for. A "level" spec
+    books the trigger as the fill, so the whole chase has to be charged as
+    basis points; a next-bar spec reads the chase off the bars, leaving
+    spread and impact. Charging both would bill the same delay twice.
+
+    The stop is the exception in both directions: it rests at the broker,
+    so it never chases, and the one thing that does beat it -- a bar
+    opening straight through the level -- is priced from the bar under
+    exit_fill="next_open" rather than as a rate.
+
+    A resting TP1 limit gives up nothing: a sell limit fills at its price
+    or better, which is what makes it worth the OCA plumbing it needs.
+    """
+    entry_rate = MARKET_LEG_SLIPPAGE_BPS if entry_fill == "level" else RESIDUAL_ENTRY_SLIPPAGE_BPS
+    exit_rate = MARKET_LEG_SLIPPAGE_BPS if exit_fill == "level" else RESIDUAL_ENTRY_SLIPPAGE_BPS
+    return {
+        "entry": entry_rate,
+        "stop": STOP_SLIPPAGE_BPS,
+        "tp1": 0.0 if tp1_resting_limit else exit_rate,
+        "new_high_exit": exit_rate,
+        "same_day_force_close": exit_rate,
+        "end_of_data": 0.0,
+    }
+
+
+# The original all-market-legs basis, kept as a named constant because the
+# historical figures were produced against it.
+MEASURED_SLIPPAGE = leg_slippage("level", "level")
 
 
 # IBKR US-stock schedules. Tiered is the cheaper base rate; Fixed is the
@@ -100,14 +132,24 @@ COST_BASES = [
 
 def entry_slippage_bps(entry_fill: str) -> float:
     """The entry rate that goes with a given fill spec."""
-    return MARKET_LEG_SLIPPAGE_BPS if entry_fill == "level" else RESIDUAL_ENTRY_SLIPPAGE_BPS
+    return leg_slippage(entry_fill, DEFAULT_EXIT_FILL)["entry"]
 
 
-def cost_bases_for(entry_fill: str, bases: list[dict] | None = None) -> list[dict]:
-    """COST_BASES with the entry rate matched to the entry spec in force."""
-    rate = entry_slippage_bps(entry_fill)
+def cost_bases_for(
+    entry_fill: str,
+    exit_fill: str = DEFAULT_EXIT_FILL,
+    tp1_resting_limit: bool = False,
+    bases: list[dict] | None = None,
+) -> list[dict]:
+    """COST_BASES with every leg's rate matched to the spec in force.
+
+    The costless bases keep no slippage at all: they exist to isolate what
+    the fill respec alone does from what the cost overlay adds, and
+    charging them a rate would defeat that.
+    """
+    slippage = leg_slippage(entry_fill, exit_fill, tp1_resting_limit)
     return [
-        {**b, "slippage": None if b["slippage"] is None else {**b["slippage"], "entry": rate}}
+        {**b, "slippage": None if b["slippage"] is None else slippage}
         for b in (COST_BASES if bases is None else bases)
     ]
 
@@ -172,9 +214,11 @@ def main() -> int:
     # basis chosen here. It also sets the entry slippage rate, since the
     # chase is either modelled by the fill bar or charged as bps, never both.
     entry = smc_live.entry_rules(rules)
-    cost_bases = cost_bases_for(entry["fill"])
-    print(f"entry spec: fill={entry['fill']} require_ob_reclaim={entry['require_ob_reclaim']} "
-          f"(entry slippage {entry_slippage_bps(entry['fill'])} bps)", flush=True)
+    exit_ = smc_live.exit_rules(rules)
+    cost_bases = cost_bases_for(entry["fill"], exit_["fill"], exit_["tp1_resting_limit"])
+    print(f"entry spec: fill={entry['fill']} require_ob_reclaim={entry['require_ob_reclaim']}", flush=True)
+    print(f"exit spec:  fill={exit_['fill']} tp1_resting_limit={exit_['tp1_resting_limit']}", flush=True)
+    print(f"slippage:   {leg_slippage(entry['fill'], exit_['fill'], exit_['tp1_resting_limit'])}", flush=True)
 
     # Build once per distinct slippage setting, not once per cost basis.
     candidates_by_slippage = {}
@@ -189,6 +233,8 @@ def main() -> int:
             slippage_bps=slippage,
             entry_fill=entry["fill"],
             require_ob_reclaim=entry["require_ob_reclaim"],
+            exit_fill=exit_["fill"],
+            tp1_resting_limit=exit_["tp1_resting_limit"],
         )
         print(f"  {len(candidates_by_slippage[key])} candidates", flush=True)
 
@@ -198,6 +244,7 @@ def main() -> int:
         ref = cands[0][0] if cands else None
 
         tagged = {"entry_fill": entry["fill"], "require_ob_reclaim": entry["require_ob_reclaim"],
+                  "exit_fill": exit_["fill"], "tp1_resting_limit": exit_["tp1_resting_limit"],
                   "basis": basis["name"]}
 
         full = run_one(cands, rules, args.initial_capital, basis["commission"])
@@ -226,8 +273,9 @@ def main() -> int:
         max_dd_pct=("max_dd_pct", "min"), pf=("pf", "mean"), win_rate_pct=("win_rate_pct", "mean"),
     ).round(3)
     print(oos.to_string())
-    print("\nzero_cost is for comparability with the repo's historical figures only; "
-          "no order type achieves it (see smc_fill_model).")
+    print(f"\nzero_cost keeps the {entry['fill']}/{exit_['fill']} FILLS and drops only commission "
+          "and the residual spread, so the gap to the realistic rows is the cost overlay alone. "
+          "It is not the old zero-cost basis, which also assumed unreachable fill PRICES.")
     print(f"\nwrote {args.out}")
     return 0
 

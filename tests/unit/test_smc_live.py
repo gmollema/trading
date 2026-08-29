@@ -162,3 +162,29 @@ class TestEntryRules(unittest.TestCase):
 
     def test_the_shipped_rules_file_parses(self):
         self.assertIn("fill", smc_live.entry_rules(smc_live.load_smc_rules()))
+
+
+class TestExitRules(unittest.TestCase):
+    def test_missing_block_keeps_the_original_spec(self):
+        self.assertEqual(
+            smc_live.exit_rules({}),
+            {"fill": "level", "tp1_resting_limit": False},
+        )
+
+    def test_partial_block_is_filled_in(self):
+        self.assertEqual(
+            smc_live.exit_rules({"exit": {"fill": "next_open"}}),
+            {"fill": "next_open", "tp1_resting_limit": False},
+        )
+
+    def test_unknown_fill_is_rejected(self):
+        with self.assertRaises(ValueError):
+            smc_live.exit_rules({"exit": {"fill": "pivot_close"}})
+
+    def test_the_shipped_rules_file_parses(self):
+        self.assertIn("fill", smc_live.exit_rules(smc_live.load_smc_rules()))
+
+    def test_entry_and_exit_specs_are_read_independently(self):
+        rules = {"entry": {"fill": "next_open"}, "exit": {"fill": "level"}}
+        self.assertEqual(smc_live.entry_rules(rules)["fill"], "next_open")
+        self.assertEqual(smc_live.exit_rules(rules)["fill"], "level")
