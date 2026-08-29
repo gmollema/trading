@@ -28,8 +28,9 @@
     "size_mult": 0.3
   },
   "time_filter": {
+    "_note": "latest_entry_et moved 15:30 -> 15:45 on 2026-08-29. Of seven candidate windows swept at the full live basis (smc_entry_window_results.csv), this was the only change that held up: it beat 10:05-15:30 in 3 of 3 walk-forward folds on both cost bases, and a fit-period selection picked it in all 3, so fit and test agree. It is small -- 25 extra signals and 8 extra round trips over fourteen months, +0.18pp out of sample -- and it is free, needing no schedule change: the cycle already runs to the close, and get_market_status gates on this value alone. Widening the EARLY bound looked worth far more (+1.0pp at 09:45) and was rejected: it wins only 2 of 3 folds and no fit period ever selected it, which is a regime effect rather than an edge. Note it would also need the hardcoded 10:00 'too_early' floor in smc_live.get_market_status lifted, not just the two schedule changes. Mechanics of this bound: cycles fire at :x2/:x7 and act on the last CLOSED bar, so 15:45 admits the 15:42 cycle acting on the 15:35 bar, which fills at the 15:40 bar's open and is force-closed at 15:51 -- about fifteen minutes to work.",
     "earliest_entry_et": "10:05",
-    "latest_entry_et": "15:30",
+    "latest_entry_et": "15:45",
     "force_close_et": "15:51"
   },
   "universe": {
