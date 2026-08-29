@@ -62,6 +62,7 @@ STOP_CONFIRM_TIMEOUT_SECS = 5
 STOP_BELOW_MARKET_BUFFER_BPS = 10
 ORDER_FILL_TIMEOUT_SECS = 10
 BAR_STALENESS_LIMIT_MINUTES = 20
+BAR_INTERVAL_MINUTES = 5
 
 
 # --------------------------------------------------------------------------
@@ -389,6 +390,42 @@ def _bars_are_fresh(bars) -> bool:
     return last_ts.date() == now_et.date() and (now_et - last_ts) <= timedelta(minutes=BAR_STALENESS_LIMIT_MINUTES)
 
 
+def fill_bar_iso(bars) -> str:
+    """Timestamp of the bar this entry fills in, given closed `bars`.
+
+    The signal is decided on the last CLOSED bar and the market order that
+    follows fills in the next one, so that next bar -- not the one that
+    triggered -- is the first the position is exposed to. It is recorded
+    as the position's entry bar because _tp1_touch_detail scans from the
+    entry bar INCLUSIVE: naming the signal bar would let a high printed
+    before the entry existed trigger TP1.
+    """
+    return (bars.index[-1] + timedelta(minutes=BAR_INTERVAL_MINUTES)).isoformat()
+
+
+def closed_bars_only(bars):
+    """Drop a final bar that is still forming.
+
+    yfinance timestamps a 5-min bar at its START and returns the current
+    one from the moment it opens, so the last row is usually a partial bar
+    whose "close" is just the last trade. The entry signal is defined on
+    CLOSED bars -- the OB reclaim rule asks where a bar finished, and the
+    backtest fills on the bar after the one that decided the signal -- so
+    acting on a partial bar means acting on a signal that can still
+    un-happen before that bar ends.
+
+    Only the entry scan uses this. Position management deliberately does
+    NOT: a TP1 touch or a stop level reached mid-bar is a reason to act
+    now, not after the bar finishes, and _last_bar_close wants the newest
+    trade precisely because it is the newest.
+    """
+    if bars is None or bars.empty:
+        return bars
+    if datetime.now(ET) < bars.index[-1] + timedelta(minutes=BAR_INTERVAL_MINUTES):
+        return bars.iloc[:-1]
+    return bars
+
+
 # --------------------------------------------------------------------------
 # Stop-out detection (fills matching, same approach as cycle.py)
 # --------------------------------------------------------------------------
@@ -685,6 +722,7 @@ def entry_scan(ib, rules: dict, env: dict, open_positions: list[dict]) -> list[d
     held_symbols = {p.contract.symbol for p in ib.positions()}
     smc_open_count = len(open_positions)
     max_concurrent = rules["risk"].get("max_concurrent_positions")
+    entry_spec = smc_live.entry_rules(rules)
 
     for ticker in watchlist:
         if max_trades_per_day is not None and today_buy_count >= max_trades_per_day:
@@ -697,6 +735,10 @@ def entry_scan(ib, rules: dict, env: dict, open_positions: list[dict]) -> list[d
 
         bars = get_5m_bars(ticker, context="entry_scan")
         if bars is None:
+            continue
+        bars = closed_bars_only(bars)
+        if bars.empty:
+            log_event({"event": "entry_skipped", "symbol": ticker, "reason": "no closed bars yet"})
             continue
         if not _bars_are_fresh(bars):
             last_ts = bars.index[-1]
@@ -714,15 +756,29 @@ def entry_scan(ib, rules: dict, env: dict, open_positions: list[dict]) -> list[d
             time_window_bars=rules["time_window_bars"],
             tp1_fraction=rules["tp1_fraction"],
             swing_window=rules["swing_window"],
+            require_ob_reclaim=entry_spec["require_ob_reclaim"],
         )
         if signal is None:
             continue
 
+        # Size against the last CLOSED price, not the OB high. The order
+        # goes in at market now and fills early in the next bar, so that
+        # close is the best estimate of what this will cost -- while the
+        # OB high is the trigger, a level the fill is not obliged to
+        # respect. Sizing on it means dividing the risk budget by a
+        # risk-per-share smaller than the one actually taken, which
+        # overshoots the 1% whenever the fill comes in above the level
+        # (i.e. on exactly the setups that are working). The stop is
+        # untouched: risk still ends at the OB's low.
+        signal_close = float(bars["Close"].iloc[-1])
         size = smc_live.entry_size(
-            env["portfolio_value_usd"], signal["entry_price"], signal["stop_price"], rules
+            env["portfolio_value_usd"], signal_close, signal["stop_price"], rules
         )
         if size < 1:
-            log_event({"event": "entry_skipped", "symbol": ticker, "reason": "size < 1"})
+            log_event({
+                "event": "entry_skipped", "symbol": ticker, "reason": "size < 1",
+                "sizing_price": round(signal_close, 2), "stop": signal["stop_price"],
+            })
             continue
 
         trade = _market_order(ib, ticker, "BUY", size)
@@ -739,7 +795,7 @@ def entry_scan(ib, rules: dict, env: dict, open_positions: list[dict]) -> list[d
             "symbol": ticker,
             "entry_price": float(fill_price),
             "entry_time_iso": datetime.now(timezone.utc).isoformat(),
-            "entry_bar_iso": bars.index[-1].isoformat(),
+            "entry_bar_iso": fill_bar_iso(bars),  # the fill bar, not the signal bar
             "qty": size,
             "original_qty": size,
             "stop_price": signal["stop_price"],
@@ -765,6 +821,7 @@ def entry_scan(ib, rules: dict, env: dict, open_positions: list[dict]) -> list[d
                 "qty": size,
                 "entry_price": float(fill_price),
                 "signal_price": float(signal["entry_price"]),
+                "sizing_price": float(signal_close),
                 "entry_slippage_bps": _rounded(
                     adverse_slippage_bps(float(signal["entry_price"]), float(fill_price), "BUY")
                 ),

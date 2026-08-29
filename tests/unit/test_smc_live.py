@@ -132,3 +132,33 @@ class TestEntrySize(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestEntryRules(unittest.TestCase):
+    """The entry spec is read from config by both the live bot and the
+    backtests, so it has exactly one reading."""
+
+    def test_missing_block_keeps_the_original_spec(self):
+        self.assertEqual(
+            smc_live.entry_rules({}),
+            {"fill": "level", "require_ob_reclaim": False},
+        )
+
+    def test_partial_block_is_filled_in(self):
+        self.assertEqual(
+            smc_live.entry_rules({"entry": {"fill": "next_open"}}),
+            {"fill": "next_open", "require_ob_reclaim": False},
+        )
+
+    def test_values_are_read_through(self):
+        spec = smc_live.entry_rules({"entry": {"fill": "next_high", "require_ob_reclaim": True}})
+        self.assertEqual(spec, {"fill": "next_high", "require_ob_reclaim": True})
+
+    def test_unknown_fill_is_rejected(self):
+        """Only the backtests consume `fill`, so a typo would otherwise go
+        unnoticed until a run misdescribed what the live bot had done."""
+        with self.assertRaises(ValueError):
+            smc_live.entry_rules({"entry": {"fill": "ob_high"}})
+
+    def test_the_shipped_rules_file_parses(self):
+        self.assertIn("fill", smc_live.entry_rules(smc_live.load_smc_rules()))

@@ -23,6 +23,7 @@ from pathlib import Path
 import pandas as pd
 
 from trading_bot.backtest import portfolio
+from trading_bot.backtest.smc_signals import DEFAULT_ENTRY_FILL, ENTRY_FILLS
 
 SMC_RULES_PATH = Path("smc_rules.json")
 SMC_WATCHLIST_PATH = Path("smc_watchlist.txt")
@@ -35,6 +36,32 @@ TRADES_CSV_HEADER = ["timestamp_iso", "symbol", "side", "size", "fill_price", "o
 
 def load_smc_rules(path: Path = SMC_RULES_PATH) -> dict:
     return json.loads(path.read_text())
+
+
+# What smc_rules.json's "entry" block means when it is absent or partial:
+# the original unreachable spec, so an old rules file keeps describing the
+# behaviour it actually described.
+DEFAULT_ENTRY_RULES = {"fill": DEFAULT_ENTRY_FILL, "require_ob_reclaim": False}
+
+
+def entry_rules(rules: dict) -> dict:
+    """The entry specification from a rules dict, defaults filled in.
+
+    Shared by the live bot and every backtest CLI so they cannot drift:
+    the whole point of respecifying the entry was that the backtest was
+    scoring a fill the bot could not get, and two independent readings of
+    the config is the obvious way to reintroduce that.
+
+    `fill` is validated here even though only the backtests consume it --
+    live it is implicit (a market order sent the moment a closed bar
+    produces a signal, which is what "next_open" models). A typo would
+    otherwise sit in the config unnoticed until a backtest run picked it
+    up, describing a live bot that had been doing something else.
+    """
+    spec = {**DEFAULT_ENTRY_RULES, **(rules.get("entry") or {})}
+    if spec["fill"] not in ENTRY_FILLS:
+        raise ValueError(f"unknown entry fill: {spec['fill']!r}; expected one of {list(ENTRY_FILLS)}")
+    return {"fill": spec["fill"], "require_ob_reclaim": bool(spec["require_ob_reclaim"])}
 
 
 def get_market_status(now_et: datetime, rules: dict) -> str:

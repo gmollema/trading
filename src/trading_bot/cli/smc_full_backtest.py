@@ -16,12 +16,18 @@ the setup is failing.
 
 Slippage is applied per leg rather than as one rate, because the legs
 differ by order type. The stop rests at IBKR as a real StopOrder and
-measured 0-5.9 bps over 7 live fills; entries and non-stop exits are
-MarketOrders sent after a level is touched, and the two TP1 fills measured
-48.5 and 79.4. ENTRY_SLIPPAGE_BPS is an assumption, not a measurement --
-it borrows TP1's figure on the grounds that it is the same order type
-against the same book. smc_cycle now logs entry_slippage_bps per fill, so
-it can be replaced with a measured number once enough entries accumulate.
+measured 0-5.9 bps over 7 live fills; the non-stop exits are MarketOrders
+sent after a level is touched, and the two TP1 fills measured 48.5 and
+79.4.
+
+The ENTRY leg's rate depends on the entry spec, which is read from the
+rules file the live bot uses (see smc_live.entry_rules) rather than fixed
+here. Under the old "level" spec it borrowed TP1's 64 bps, since it was
+the same order type chasing the same kind of level. Under a next-bar fill
+the chase is read off the bars instead, so only spread and impact are left
+to charge -- see RESIDUAL_ENTRY_SLIPPAGE_BPS. Charging both would bill the
+same delay twice. The exits keep the full rate either way: they have the
+same defect the entry had and have not been respecified.
 
 Candidates are rebuilt only when slippage changes, since commission is
 applied at portfolio level and cannot affect signal generation.
@@ -40,6 +46,7 @@ from pathlib import Path
 
 import pandas as pd
 
+from trading_bot import smc_live
 from trading_bot.backtest.smc_engine import build_smc_candidates, simulate_smc_portfolio
 from trading_bot.cli.smc_rr_walkforward import (
     DEFAULT_BOUNDARIES,
@@ -57,6 +64,14 @@ STOP_SLIPPAGE_BPS = 2.0
 MARKET_LEG_SLIPPAGE_BPS = 64.0
 ENTRY_SLIPPAGE_BPS = MARKET_LEG_SLIPPAGE_BPS  # assumed, not measured
 
+# What is left on the entry once the fill bar itself prices the chase. The
+# 64 bps above is (fill - level)/level for an order sent up to a bar after
+# the level was touched: it IS the chase, and charging it on top of a
+# next-bar fill would bill the same delay twice. The stop leg is the
+# evidence for the remainder -- a market execution that does not chase,
+# measured 0-5.9 bps over 7 live fills, median 2.0.
+RESIDUAL_ENTRY_SLIPPAGE_BPS = STOP_SLIPPAGE_BPS
+
 MEASURED_SLIPPAGE = {
     "entry": ENTRY_SLIPPAGE_BPS,
     "stop": STOP_SLIPPAGE_BPS,
@@ -65,6 +80,7 @@ MEASURED_SLIPPAGE = {
     "same_day_force_close": MARKET_LEG_SLIPPAGE_BPS,
     "end_of_data": 0.0,
 }
+
 
 # IBKR US-stock schedules. Tiered is the cheaper base rate; Fixed is the
 # conservative bound. The per-ORDER minimum is what bites at this
@@ -80,6 +96,20 @@ COST_BASES = [
     {"name": "realistic_tiered", "slippage": MEASURED_SLIPPAGE, "commission": TIERED},
     {"name": "realistic_fixed", "slippage": MEASURED_SLIPPAGE, "commission": FIXED},
 ]
+
+
+def entry_slippage_bps(entry_fill: str) -> float:
+    """The entry rate that goes with a given fill spec."""
+    return MARKET_LEG_SLIPPAGE_BPS if entry_fill == "level" else RESIDUAL_ENTRY_SLIPPAGE_BPS
+
+
+def cost_bases_for(entry_fill: str, bases: list[dict] | None = None) -> list[dict]:
+    """COST_BASES with the entry rate matched to the entry spec in force."""
+    rate = entry_slippage_bps(entry_fill)
+    return [
+        {**b, "slippage": None if b["slippage"] is None else {**b["slippage"], "entry": rate}}
+        for b in (COST_BASES if bases is None else bases)
+    ]
 
 
 def slippage_key(slippage: dict | None) -> str:
@@ -137,9 +167,18 @@ def main() -> int:
     tickers = [t.strip() for t in args.tickers.split(",")] if args.tickers else list(SP500_TICKERS)
     folds = expanding_folds(args.fit_start, [b.strip() for b in args.boundaries.split(",")])
 
+    # The entry spec comes from the rules file the live bot reads, so this
+    # scores the entry the bot is actually trying to get rather than a
+    # basis chosen here. It also sets the entry slippage rate, since the
+    # chase is either modelled by the fill bar or charged as bps, never both.
+    entry = smc_live.entry_rules(rules)
+    cost_bases = cost_bases_for(entry["fill"])
+    print(f"entry spec: fill={entry['fill']} require_ob_reclaim={entry['require_ob_reclaim']} "
+          f"(entry slippage {entry_slippage_bps(entry['fill'])} bps)", flush=True)
+
     # Build once per distinct slippage setting, not once per cost basis.
     candidates_by_slippage = {}
-    for key, slippage in group_by_slippage(COST_BASES).items():
+    for key, slippage in group_by_slippage(cost_bases).items():
         print(f"building candidates (slippage={key})...", flush=True)
         candidates_by_slippage[key] = build_smc_candidates(
             tickers,
@@ -148,17 +187,22 @@ def main() -> int:
             tp1_fraction=rules["tp1_fraction"],
             swing_window=rules["swing_window"],
             slippage_bps=slippage,
+            entry_fill=entry["fill"],
+            require_ob_reclaim=entry["require_ob_reclaim"],
         )
         print(f"  {len(candidates_by_slippage[key])} candidates", flush=True)
 
     rows = []
-    for basis in COST_BASES:
+    for basis in cost_bases:
         cands = candidates_by_slippage[slippage_key(basis["slippage"])]
         ref = cands[0][0] if cands else None
 
+        tagged = {"entry_fill": entry["fill"], "require_ob_reclaim": entry["require_ob_reclaim"],
+                  "basis": basis["name"]}
+
         full = run_one(cands, rules, args.initial_capital, basis["commission"])
         if full:
-            rows.append({"basis": basis["name"], "scope": "full_period", "fold": 0, **full})
+            rows.append({**tagged, "scope": "full_period", "fold": 0, **full})
             print(f"{basis['name']:20s} full: {full['trades']} trades  ret {full['ret_pct']}%  "
                   f"pf {full['pf']}  dd {full['max_dd_pct']}%", flush=True)
 
@@ -167,7 +211,7 @@ def main() -> int:
             test_end = align_tz(fold["test_end"], ref)
             stats = run_one(cands, rules, args.initial_capital, basis["commission"], fit_end, test_end)
             if stats:
-                rows.append({"basis": basis["name"], "scope": "test", "fold": fold["fold"], **stats})
+                rows.append({**tagged, "scope": "test", "fold": fold["fold"], **stats})
 
     df = pd.DataFrame(rows)
     df.to_csv(args.out, index=False)

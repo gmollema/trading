@@ -85,6 +85,63 @@ class TestBarsAreFresh(unittest.TestCase):
         self.assertFalse(smc_cycle._bars_are_fresh(bars))
 
 
+class TestClosedBarsOnly(unittest.TestCase):
+    """The entry signal is defined on closed bars; yfinance hands back the
+    forming one as the last row."""
+
+    def _bars(self, last_bar_age_minutes: float, periods: int = 4):
+        last = datetime.now(ET) - timedelta(minutes=last_bar_age_minutes)
+        idx = pd.date_range(last - timedelta(minutes=5 * (periods - 1)), last, freq="5min")
+        return pd.DataFrame({"Close": [1.0] * len(idx)}, index=idx)
+
+    def test_forming_last_bar_is_dropped(self):
+        bars = self._bars(last_bar_age_minutes=2)  # 2 min into a 5-min bar
+        trimmed = smc_cycle.closed_bars_only(bars)
+        self.assertEqual(len(trimmed), len(bars) - 1)
+        self.assertEqual(trimmed.index[-1], bars.index[-2])
+
+    def test_closed_last_bar_is_kept(self):
+        bars = self._bars(last_bar_age_minutes=6)  # the 5 minutes have elapsed
+        self.assertEqual(len(smc_cycle.closed_bars_only(bars)), len(bars))
+
+    def test_single_forming_bar_leaves_nothing(self):
+        """First bar of the session: there is no closed bar to act on yet,
+        and the caller has to see that rather than an almost-empty frame."""
+        bars = self._bars(last_bar_age_minutes=1, periods=1)
+        self.assertTrue(smc_cycle.closed_bars_only(bars).empty)
+
+    def test_empty_and_none_pass_through(self):
+        self.assertIsNone(smc_cycle.closed_bars_only(None))
+        empty = pd.DataFrame({"Close": []}, index=pd.DatetimeIndex([]))
+        self.assertTrue(smc_cycle.closed_bars_only(empty).empty)
+
+
+class TestFillBarIso(unittest.TestCase):
+    """The recorded entry bar has to be the one the order fills in, since
+    the TP1 scan starts there and includes it."""
+
+    def _bars(self):
+        idx = pd.date_range(datetime(2026, 8, 28, 10, 0, tzinfo=ET), periods=3, freq="5min")
+        return pd.DataFrame({"High": [1.0, 2.0, 3.0], "Close": [1.0, 2.0, 3.0]}, index=idx)
+
+    def test_points_one_interval_past_the_signal_bar(self):
+        bars = self._bars()
+        self.assertEqual(
+            smc_cycle.fill_bar_iso(bars),
+            datetime(2026, 8, 28, 10, 15, tzinfo=ET).isoformat(),
+        )
+
+    def test_tp1_scan_starts_after_the_signal_bars_high(self):
+        """The signal bar's own high printed before the position existed,
+        so it must not be in the window a TP1 touch is read from."""
+        bars = self._bars()
+        later = bars.copy()
+        later.loc[datetime(2026, 8, 28, 10, 15, tzinfo=ET)] = {"High": 4.0, "Close": 4.0}
+        idx = smc_cycle._entry_bar_index(later, smc_cycle.fill_bar_iso(bars))
+        self.assertEqual(idx, 3)
+        self.assertEqual(float(later["High"].iloc[idx]), 4.0)
+
+
 class TestGet5mBarsLogging(unittest.TestCase):
     """get_5m_bars returns None down three separate paths and callers see
     only that None, so each path has to say why it bailed."""

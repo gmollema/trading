@@ -2,6 +2,11 @@
   "strategy_name": "SMC Level 1 (order blocks)",
   "direction": "long_only",
   "trade_timeframe": "5m",
+  "entry": {
+    "_note": "Respecified 2026-08-29 because the previous entry was not reachable by any order type. It filled at the order block's high the instant a bar's low touched it; smc_fill_model showed a limit resting there fills 31-42% of signals and almost only when the setup is failing, while a market order sent once the touch is known measured 48-79 bps of slippage against a 17.3 bps median stop distance. fill='next_open' scores the entry at the open of the bar AFTER the closed bar that produced the signal, which is what the live bot's market order actually gets; the live bot realises it by evaluating closed bars only (smc_cycle.closed_bars_only) and ordering at market immediately. require_ob_reclaim adds the one signal-side rule the fill model paid for: the retesting bar must CLOSE back above the OB high, which is decidable before the order goes in. Out-of-sample over 3 expanding folds, this spec beats no-reclaim on every cost basis (zero-cost +21.3% pf 2.02 vs +14.2% pf 1.60; with commission +20.2% vs +12.9%). See smc_entry_spec_results.csv.",
+    "fill": "next_open",
+    "require_ob_reclaim": true
+  },
   "swing_window": 20,
   "time_window_bars": 33,
   "tp1_fraction": 0.25,
