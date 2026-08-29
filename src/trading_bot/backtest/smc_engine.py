@@ -17,6 +17,8 @@ import heapq
 import itertools
 from pathlib import Path
 
+import pandas as pd
+
 from trading_bot.backtest import portfolio
 from trading_bot.backtest.data import DAILY_DIR, INTRADAY_DIR, compute_daily_context, load_daily, load_intraday
 from trading_bot.backtest.smc_signals import (
@@ -27,6 +29,7 @@ from trading_bot.backtest.smc_signals import (
     find_smc_long_trades,
 )
 
+ET_TZ = "America/New_York"
 DEFAULT_MAX_POSITION_PCT = 10.0
 DEFAULT_MAX_CONCURRENT_POSITIONS = 2
 DEFAULT_TIME_WINDOW_BARS = 33
@@ -48,6 +51,101 @@ def _daily_uptrend_dates(ticker: str, daily_dir: Path) -> set | None:
     ctx = compute_daily_context(daily_df)
     uptrend = ctx[ctx["prior_day_close"] > ctx["sma200"]]
     return set(uptrend["Date"].dt.date)
+
+
+DEFAULT_SMA_WINDOW = 200
+DEFAULT_DOLLAR_VOLUME_WINDOW = 20
+
+
+def daily_watchlist_by_date(
+    tickers: list[str],
+    daily_dir: Path = DAILY_DIR,
+    min_price: float = 0.0,
+    max_size: int | None = None,
+    sma_window: int = DEFAULT_SMA_WINDOW,
+    dollar_volume_window: int = DEFAULT_DOLLAR_VOLUME_WINDOW,
+) -> dict:
+    """Rebuild, for every trading date, the watchlist the live bot had.
+
+    cli/smc_prefilter.py runs at 09:40 ET and writes smc_watchlist.txt:
+    S&P 500 names whose PRIOR close is above their SMA200 and at or above
+    universe.min_price_usd, ranked by 20-day average dollar volume, capped
+    at universe.max_watchlist_size. smc_cycle only ever scans that file.
+
+    The backtests scanned all 503 tickers, so they were scoring a bot with
+    a ~12x larger universe than the one running -- and not a random 12x:
+    the cap keeps the most liquid names, which is where fills are best and
+    5-minute bars most trustworthy. daily_trend_filter reproduced only the
+    SMA200 half of the screen and nothing about the ranking or the cap.
+
+    Everything here is anchored to prior-day data (compute_daily_context
+    shifts by one bar, and the dollar-volume mean is shifted to match), so
+    a date's watchlist is fully determined before that date opens -- the
+    same property that lets the live screen run once each morning.
+
+    Returns {trading date: set of tickers}. Dates with no qualifying
+    ticker are present with an empty set, so a caller can tell "the
+    universe was empty that day" from "that day is outside the data".
+    """
+    frames = []
+    for ticker in tickers:
+        daily_df = load_daily(ticker, daily_dir)
+        if daily_df is None or daily_df.empty:
+            continue
+        ctx = compute_daily_context(daily_df)
+        dollar_volume = (daily_df["Close"] * daily_df["Volume"]).rolling(dollar_volume_window).mean()
+        frames.append(pd.DataFrame({
+            "date": ctx["Date"].dt.date,
+            "ticker": ticker,
+            "prior_close": ctx["prior_day_close"],
+            "sma200": ctx["Close"].rolling(sma_window).mean().shift(1),
+            "dollar_volume": dollar_volume.shift(1),
+        }))
+    if not frames:
+        return {}
+
+    table = pd.concat(frames, ignore_index=True).dropna(
+        subset=["prior_close", "sma200", "dollar_volume"]
+    )
+    eligible = table[(table.prior_close > table.sma200) & (table.prior_close >= min_price)]
+
+    watchlist = {d: set() for d in table["date"].unique()}
+    for date, group in eligible.groupby("date", sort=False):
+        ranked = group.sort_values("dollar_volume", ascending=False)
+        if max_size is not None:
+            ranked = ranked.head(max_size)
+        watchlist[date] = set(ranked["ticker"])
+    return watchlist
+
+
+def watchlist_from_rules(tickers: list[str], daily_dir: Path, rules: dict) -> dict:
+    """daily_watchlist_by_date driven by smc_rules.json's universe block --
+    the same keys cli/smc_prefilter.py reads, so the two cannot drift."""
+    universe = rules.get("universe") or {}
+    return daily_watchlist_by_date(
+        tickers,
+        daily_dir=daily_dir,
+        min_price=universe.get("min_price_usd", 0.0),
+        max_size=universe.get("max_watchlist_size"),
+    )
+
+
+def entry_window_mask(dates, earliest_et: str | None, latest_et: str | None) -> list[bool]:
+    """Per-bar mask for smc_signals' entry_allowed, from ET wall-clock
+    bounds (smc_rules.json time_filter). Bounds are inclusive, matching
+    smc_live.get_market_status' reading of the same two keys.
+
+    `dates` is the intraday frame's tz-aware date column; the comparison
+    is vectorized here because doing it per bar inside the signal loop is
+    a tz conversion per bar per ticker.
+    """
+    times = dates.dt.tz_convert(ET_TZ).dt.strftime("%H:%M")
+    mask = pd.Series(True, index=times.index)
+    if earliest_et:
+        mask &= times >= earliest_et
+    if latest_et:
+        mask &= times <= latest_et
+    return mask.tolist()
 
 
 def _trade_row(timestamp, symbol: str, side: str, qty: float, price: float, order_id: int, reason: str) -> dict:
@@ -84,6 +182,8 @@ def build_smc_candidates(
     require_ob_reclaim: bool = False,
     exit_fill: str = DEFAULT_EXIT_FILL,
     tp1_resting_limit: bool = False,
+    daily_watchlist: dict | None = None,
+    entry_window_et: tuple | None = None,
 ) -> list[tuple]:
     """Per-symbol signal generation only (see module docstring, phase 1) --
     independent of everything portfolio-level (equity, sizing, concurrency,
@@ -92,6 +192,27 @@ def build_smc_candidates(
     simulate_smc_portfolio() calls instead of re-scanning every ticker's
     full history per combo. Returns a list of (entry_date, symbol, trade)
     tuples sorted the way simulate_smc_portfolio expects.
+
+    daily_watchlist: {trading date: set of tickers} from
+        daily_watchlist_by_date -- the universe the live bot's morning
+        prefilter would have handed it that day. A candidate survives only
+        if its symbol was on that date's list. Supersedes
+        daily_trend_filter, which reproduced the SMA200 screen but not the
+        dollar-volume ranking or the 40-name cap, and so still scanned
+        roughly twelve times the live universe.
+
+        Filtering here rather than inside find_smc_long_trades is exact
+        rather than convenient, and only because entries are gated to one
+        day: with force_close_same_day on, no position spans a date
+        boundary, so dropping a day's trades cannot change what any other
+        day would have done. The gate is on the ENTRY date either way,
+        which is also what the live bot does -- it manages an open
+        position whether or not the symbol is still on today's list.
+
+    entry_window_et: (earliest, latest) ET wall-clock bounds for opening a
+        new position, e.g. ("10:05", "15:30") from smc_rules.json's
+        time_filter. Without it the backtest opened positions at 09:35 and
+        15:45, times the live cycle does not even scan at.
     """
     candidates = []  # (entry_date, symbol, trade_dict)
     for ticker in tickers:
@@ -110,12 +231,18 @@ def build_smc_candidates(
             "low": df["low"].tolist(), "close": df["close"].tolist(),
             "date": df["date"].tolist(),
         }
+        entry_allowed = None
+        if entry_window_et is not None:
+            entry_allowed = entry_window_mask(df["date"], *entry_window_et)
         for trade in find_smc_long_trades(
             bars, time_window_bars, tp1_fraction, swing_window, require_confirmed_trend,
             force_close_same_day, slippage_bps, post_tp1_stop_fraction, exit_fully_at_tp1,
-            entry_fill, require_ob_reclaim, exit_fill, tp1_resting_limit,
+            entry_fill, require_ob_reclaim, exit_fill, tp1_resting_limit, entry_allowed,
         ):
-            if uptrend_dates is not None and trade["entry_date"].date() not in uptrend_dates:
+            entry_day = trade["entry_date"].date()
+            if uptrend_dates is not None and entry_day not in uptrend_dates:
+                continue
+            if daily_watchlist is not None and ticker not in daily_watchlist.get(entry_day, ()):
                 continue
             candidates.append((trade["entry_date"], ticker, trade))
 

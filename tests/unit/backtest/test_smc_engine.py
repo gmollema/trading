@@ -14,7 +14,12 @@ from pathlib import Path
 import pandas as pd
 
 from trading_bot.backtest import portfolio
-from trading_bot.backtest.smc_engine import run_smc_backtest
+from trading_bot.backtest.smc_engine import (
+    build_smc_candidates,
+    daily_watchlist_by_date,
+    entry_window_mask,
+    run_smc_backtest,
+)
 
 # Same OHLC sequence as test_smc_signals.py's test_full_trade_lifecycle:
 # entry @ 11 (idx 8), stop @ 8 (idx 5's low), no TP1, full exit @ 17 (idx 11,
@@ -224,3 +229,129 @@ class TestRunSmcBacktestConcurrencyCap(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def _write_daily_csv(path: Path, closes: list[float], volumes: list[float], start="2024-01-02"):
+    lines = ["Date,Open,High,Low,Close,Volume,Dividends,Stock Splits"]
+    ts = pd.Timestamp(start)
+    for close, volume in zip(closes, volumes):
+        lines.append(f"{ts.strftime('%Y-%m-%d')} 00:00:00-05:00,{close},{close},{close},{close},{volume},0.0,0.0")
+        ts += pd.Timedelta(days=1)
+    path.write_text("\n".join(lines) + "\n")
+
+
+class TestDailyWatchlistByDate(unittest.TestCase):
+    """Rebuilds what cli/smc_prefilter.py would have written each morning:
+    prior close above SMA200 and at/above min_price, ranked by 20-day
+    average dollar volume, capped at max_watchlist_size."""
+
+    SMA = 5
+    DV = 3
+
+    def setUp(self):
+        self._tmpdir = tempfile.TemporaryDirectory()
+        self.daily_dir = Path(self._tmpdir.name)
+
+    def tearDown(self):
+        self._tmpdir.cleanup()
+
+    def _build(self, **kwargs):
+        return daily_watchlist_by_date(
+            sorted(p.stem for p in self.daily_dir.glob("*.csv")),
+            daily_dir=self.daily_dir, sma_window=self.SMA, dollar_volume_window=self.DV, **kwargs,
+        )
+
+    def test_only_names_above_their_sma_qualify(self):
+        _write_daily_csv(self.daily_dir / "UP.csv", [10, 11, 12, 13, 14, 15, 16], [100] * 7)
+        _write_daily_csv(self.daily_dir / "DOWN.csv", [16, 15, 14, 13, 12, 11, 10], [100] * 7)
+        watchlist = self._build()
+        qualifying = {d: names for d, names in watchlist.items() if names}
+        self.assertTrue(qualifying)
+        for names in qualifying.values():
+            self.assertIn("UP", names)
+            self.assertNotIn("DOWN", names)
+
+    def test_ranked_by_dollar_volume_and_capped(self):
+        for name, volume in (("THIN", 10), ("MID", 100), ("THICK", 1000)):
+            _write_daily_csv(self.daily_dir / f"{name}.csv", [10, 11, 12, 13, 14, 15, 16], [volume] * 7)
+        watchlist = self._build(max_size=2)
+        picked = [names for names in watchlist.values() if names]
+        self.assertTrue(picked)
+        for names in picked:
+            self.assertEqual(names, {"THICK", "MID"})
+
+    def test_min_price_screens_on_the_prior_close(self):
+        _write_daily_csv(self.daily_dir / "PENNY.csv", [1, 1.1, 1.2, 1.3, 1.4, 1.5, 1.6], [100] * 7)
+        self.assertTrue(any(self._build(min_price=0.0).values()))
+        self.assertFalse(any(self._build(min_price=5.0).values()))
+
+    def test_a_date_is_decided_before_it_opens(self):
+        """Anchored to prior-day data, like the 09:40 ET screen. A name
+        that only crosses its SMA on the last day must not appear on that
+        day's list -- that would be trading on a close not yet printed."""
+        _write_daily_csv(self.daily_dir / "LATE.csv", [10, 9, 8, 7, 6, 5, 99], [100] * 7)
+        for names in self._build().values():
+            self.assertNotIn("LATE", names)
+
+    def test_dates_with_no_qualifier_are_present_but_empty(self):
+        """So a caller can tell an empty universe from a date outside the
+        data -- the difference between "no trades allowed" and "no data"."""
+        _write_daily_csv(self.daily_dir / "DOWN.csv", [16, 15, 14, 13, 12, 11, 10], [100] * 7)
+        watchlist = self._build()
+        self.assertTrue(watchlist)
+        self.assertTrue(all(names == set() for names in watchlist.values()))
+
+
+class TestEntryWindowMask(unittest.TestCase):
+    def _dates(self, times: list[str]):
+        return pd.Series(pd.to_datetime([f"2024-01-02 {t}:00-05:00" for t in times], utc=True))
+
+    def test_bounds_are_inclusive(self):
+        dates = self._dates(["09:35", "10:05", "12:00", "15:30", "15:45"])
+        self.assertEqual(
+            entry_window_mask(dates, "10:05", "15:30"),
+            [False, True, True, True, False],
+        )
+
+    def test_open_ended_bounds(self):
+        dates = self._dates(["09:35", "12:00", "15:45"])
+        self.assertEqual(entry_window_mask(dates, None, "15:30"), [True, True, False])
+        self.assertEqual(entry_window_mask(dates, "10:05", None), [False, True, True])
+        self.assertEqual(entry_window_mask(dates, None, None), [True, True, True])
+
+    def test_compares_in_et_not_utc(self):
+        """Cached bars are stored in UTC; 14:00 UTC is 09:00 ET, before
+        the window, and reading the raw hour would let it through."""
+        dates = pd.Series(pd.to_datetime(["2024-01-02 14:00:00+00:00"], utc=True))
+        self.assertEqual(entry_window_mask(dates, "10:05", "15:30"), [False])
+
+
+class TestBuildCandidatesUniverse(unittest.TestCase):
+    """The watchlist gate is on the ENTRY date, matching the live bot,
+    which manages an open position whether or not the symbol is still on
+    today's list."""
+
+    def setUp(self):
+        self._tmpdir = tempfile.TemporaryDirectory()
+        self.intraday_dir = Path(self._tmpdir.name)
+        _write_intraday_csv(self.intraday_dir / "AAA.csv", LIFECYCLE_ROWS)
+
+    def tearDown(self):
+        self._tmpdir.cleanup()
+
+    def _candidates(self, **kwargs):
+        return build_smc_candidates(["AAA"], intraday_dir=self.intraday_dir, **kwargs)
+
+    def test_no_watchlist_keeps_everything(self):
+        self.assertEqual(len(self._candidates()), 1)
+
+    def test_symbol_on_that_days_list_is_kept(self):
+        entry_day = self._candidates()[0][0].date()
+        self.assertEqual(len(self._candidates(daily_watchlist={entry_day: {"AAA"}})), 1)
+
+    def test_symbol_off_that_days_list_is_dropped(self):
+        entry_day = self._candidates()[0][0].date()
+        self.assertEqual(self._candidates(daily_watchlist={entry_day: {"BBB"}}), [])
+
+    def test_a_date_missing_from_the_watchlist_trades_nothing(self):
+        self.assertEqual(self._candidates(daily_watchlist={}), [])

@@ -778,3 +778,48 @@ class TestTp1ExitFill(unittest.TestCase):
         trade = self._trades(exit_fill="next_open", post_tp1_stop_fraction=5.0)[0]
         tp1_fill = trade["fills"][0]
         self.assertLessEqual(trade["stop_price"], tp1_fill["price"])
+
+
+class TestEntryAllowed(unittest.TestCase):
+    """The live bot only scans for entries between time_filter's bounds.
+    The backtest scanned every bar, so it opened positions at times the
+    bot does not even look at."""
+
+    LIFECYCLE_ROWS = TestEntryFill.LIFECYCLE_ROWS
+    ENTRY_IDX = 8
+
+    def _mask(self, blocked: set[int]) -> list[bool]:
+        return [i not in blocked for i in range(len(self.LIFECYCLE_ROWS))]
+
+    def test_none_allows_every_bar(self):
+        trades = smc.find_smc_long_trades(_bars(self.LIFECYCLE_ROWS), entry_allowed=None)
+        self.assertEqual(len(trades), 1)
+
+    def test_allowed_entry_bar_still_trades(self):
+        trades = smc.find_smc_long_trades(
+            _bars(self.LIFECYCLE_ROWS), entry_allowed=self._mask(set()),
+        )
+        self.assertEqual(trades[0]["entry_idx"], self.ENTRY_IDX)
+
+    def test_blocked_entry_bar_takes_no_trade(self):
+        trades = smc.find_smc_long_trades(
+            _bars(self.LIFECYCLE_ROWS), entry_allowed=self._mask({self.ENTRY_IDX}),
+        )
+        self.assertEqual(trades, [])
+
+    def test_a_blocked_retest_still_mitigates_the_order_block(self):
+        """What the live bot does: smc_cycle re-runs the whole signal pass
+        each cycle, so a touch outside the window has already consumed the
+        block by the time the next in-window cycle looks at it. Leaving it
+        pending would invent an entry the bot cannot take."""
+        rows = list(self.LIFECYCLE_ROWS) + [
+            (14, 14, 10, 13),   # 14 -- touches the OB high (11) again
+            (13, 15, 13, 14),   # 15
+        ]
+        mask = [i != self.ENTRY_IDX for i in range(len(rows))]
+        self.assertEqual(smc.find_smc_long_trades(_bars(rows), entry_allowed=mask), [])
+
+    def test_mask_length_must_match_the_bars(self):
+        """A short mask would silently gate the wrong bars."""
+        with self.assertRaises(ValueError):
+            smc.find_smc_long_trades(_bars(self.LIFECYCLE_ROWS), entry_allowed=[True] * 3)

@@ -259,6 +259,7 @@ def find_smc_long_trades(
     require_ob_reclaim: bool = False,
     exit_fill: str = DEFAULT_EXIT_FILL,
     tp1_resting_limit: bool = False,
+    entry_allowed: list[bool] | None = None,
 ) -> list[dict]:
     """Scan one symbol's chronological 5-min bars and return every long
     trade this Level 1 SMC strategy would have taken, fully simulated
@@ -350,6 +351,23 @@ def find_smc_long_trades(
             position while the stop covers all of it, so the two orders
             have to be bracketed (OCA) to avoid selling more than is
             held. Model it before building it.
+        entry_allowed: per-bar mask, parallel to the bar lists, saying
+            whether a NEW entry may open on that bar. None (the default)
+            allows every bar. Used for the live bot's entry window
+            (smc_rules.json time_filter: 10:05-15:30 ET), which the
+            backtest ignored entirely -- it was taking entries at 09:35
+            and 15:45 that the bot would never have scanned for.
+            Computed by the caller rather than here, since deriving ET
+            wall-clock times per bar is a vectorized one-liner on the
+            source frame and a slow loop on a list of Timestamps.
+
+            A retest on a disallowed bar still MITIGATES its order block.
+            That is not a modelling nicety, it is what the live bot does:
+            smc_cycle re-runs find_smc_long_trades over the whole recent
+            window each cycle, so a touch at 09:45 has already consumed
+            the block by the time the 10:10 cycle looks at it, and no
+            signal is reported. Leaving the block pending would invent
+            entries the bot cannot take.
         exit_fully_at_tp1: sell the ENTIRE position at tp1_price instead of
             tp1_fraction of it, ending the trade there -- no runner, no
             breakeven stop, no new-high exit. This is the exit policy that
@@ -377,6 +395,10 @@ def find_smc_long_trades(
         raise ValueError(f"unknown entry_fill: {entry_fill!r}; expected one of {list(ENTRY_FILLS)}")
     if exit_fill not in EXIT_FILLS:
         raise ValueError(f"unknown exit_fill: {exit_fill!r}; expected one of {list(EXIT_FILLS)}")
+    if entry_allowed is not None and len(entry_allowed) != len(bars["close"]):
+        raise ValueError(
+            f"entry_allowed has {len(entry_allowed)} entries for {len(bars['close'])} bars"
+        )
     opens, highs, lows, closes, dates = bars["open"], bars["high"], bars["low"], bars["close"], bars["date"]
     slip = _normalize_slippage_bps(slippage_bps)
     n = len(closes)
@@ -546,6 +568,13 @@ def find_smc_long_trades(
 
                 if require_ob_reclaim and closes[i] <= ob["ob_high"]:
                     # Retested and rejected: still mitigated, just not traded.
+                    pending_bull_obs.remove(ob)
+                    continue
+
+                if entry_allowed is not None and not entry_allowed[i]:
+                    # Outside the bot's entry window. The retest happened
+                    # regardless, and the live recompute consumes the block
+                    # exactly the same way -- see entry_allowed's docstring.
                     pending_bull_obs.remove(ob)
                     continue
 
