@@ -41,20 +41,25 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-WATCHLIST_PATH = Path("watchlist.txt")
-POSITIONS_PATH = Path("open_positions.json")
-RULES_PATH = Path("rules.json")
-TRADES_CSV_PATH = Path("trades.csv")
-SAFETY_LOG_PATH = Path("safety-check-log.json")
+# Both of these are dependency-free by design, so importing them cannot
+# defeat the fast gate below. live.py is this bot's smc_live: the pure
+# helpers, importable without the entrypoint (see its module docstring).
+from trading_bot.live import (  # noqa: E402
+    POSITIONS_PATH,
+    SAFETY_LOG_PATH,
+    TRADES_CSV_PATH,
+    compute_swing_lows,
+    get_market_status,
+    load_rules,
+    read_watchlist,
+)
+from trading_bot.util.market_hours import MARKET_CLOSE_ET, MARKET_OPEN_ET  # noqa: E402
+
 HEARTBEAT_PATH = Path("heartbeat.json")
 LOGS_DIR = Path("logs")
 CYCLE_ERRORS_LOG = LOGS_DIR / "cycle_errors.log"
 
 ET = ZoneInfo("America/New_York")
-
-# Dependency-free by design, so importing it cannot defeat the fast gate
-# below (see util/market_hours.py).
-from trading_bot.util.market_hours import MARKET_CLOSE_ET, MARKET_OPEN_ET  # noqa: E402
 
 SETTLED_ORDER_STATUSES = {"Filled", "Cancelled", "ApiCancelled", "Inactive", "Rejected"}
 FAILED_SELL_STATUSES = {"Cancelled", "ApiCancelled", "Inactive", "Rejected"}
@@ -65,50 +70,6 @@ CANCEL_CONFIRM_TIMEOUT_SECS = 5
 # --------------------------------------------------------------------------
 # STEP 1: TIME GATE (pure stdlib, cheap - must stay fast)
 # --------------------------------------------------------------------------
-
-def get_market_status(now_et: datetime, rules: dict) -> str:
-    """Returns one of: weekend, too_early, closed, manage_only, force_close, ok.
-
-    Boundaries come from rules.json's time_filter. They used to be
-    hardcoded here -- all four of them -- which made that whole config
-    block decorative: it happened to state the same values the code used,
-    so it read as authoritative while changing it did nothing at all.
-
-    The only times still fixed in code are the session's own
-    (util.market_hours), because those are a fact about the exchange
-    rather than a choice this strategy makes. An earliest_entry_et before
-    the open therefore means "from the open", not an error.
-
-    The old floor also sat ABOVE earliest_entry_et at 10:00, and
-    "too_early" exits the entire cycle rather than just declining to
-    enter -- so a position that survived a failed force-close went
-    unmanaged, with no stop repair and no exit, through the first half
-    hour of the session.
-    """
-    if now_et.weekday() >= 5:  # 5 = Saturday, 6 = Sunday
-        return "weekend"
-
-    tf = rules["time_filter"]
-    earliest_entry = tf["earliest_entry_et"]
-    latest_entry = tf["latest_entry_et"]
-    force_close = tf["force_close_et"]
-
-    hm = now_et.strftime("%H:%M")
-
-    if hm < MARKET_OPEN_ET:
-        return "too_early"
-    if hm > MARKET_CLOSE_ET:
-        return "closed"
-    if hm < earliest_entry:
-        return "manage_only"
-    if hm < latest_entry:
-        return "ok"
-    if hm < force_close:
-        return "manage_only"
-    if hm <= MARKET_CLOSE_ET:
-        return "force_close"
-    return "closed"  # unreachable, defensive fallback
-
 
 def _fast_exit_check() -> str | None:
     """Session bounds only, checked before any heavy imports.
@@ -376,19 +337,6 @@ def get_5m_bars_today(symbol_ibkr: str):
     today = datetime.now(ET).date()
     today_bars = bars[bars.index.date == today]
     return today_bars if not today_bars.empty else None
-
-
-def compute_swing_lows(bars_5m) -> list[float]:
-    """A bar's low is a swing low if it's lower than the 2 bars before AND
-    the 2 bars after it. Returns swing lows in chronological order."""
-    lows = bars_5m["Low"].tolist()
-    swing_lows = []
-    for i in range(2, len(lows) - 2):
-        before = lows[i - 2:i]
-        after = lows[i + 1:i + 3]
-        if lows[i] < min(before) and lows[i] < min(after):
-            swing_lows.append(float(lows[i]))
-    return swing_lows
 
 
 # --------------------------------------------------------------------------
@@ -724,20 +672,6 @@ def evaluate_entry_filters(symbol_ibkr: str, rules: dict) -> tuple[bool, list[st
     return all_pass, reasons, details
 
 
-def read_watchlist() -> list[str]:
-    if not WATCHLIST_PATH.exists():
-        return []
-    tickers = []
-    for line in WATCHLIST_PATH.read_text().splitlines():
-        line = line.strip()
-        if not line or line.startswith("#"):
-            continue
-        ticker = line.split("#")[0].strip()
-        if ticker:
-            tickers.append(ticker)
-    return tickers
-
-
 def count_today_buys() -> int:
     if not TRADES_CSV_PATH.exists():
         return 0
@@ -887,7 +821,7 @@ def connect_ibkr(host: str, port: int, client_id: int) -> IBKRClient:
 # --------------------------------------------------------------------------
 
 def main() -> int:
-    rules = json.loads(RULES_PATH.read_text())
+    rules = load_rules()
     status = get_market_status(datetime.now(ET), rules)
 
     # Weekend/too_early/closed already handled by the fast-path gate above

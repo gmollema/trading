@@ -41,95 +41,6 @@ def et(date: tuple[int, int, int], hour: int, minute: int) -> datetime:
     return datetime(year, month, day, hour, minute, tzinfo=ET)
 
 
-class TestGetMarketStatus(unittest.TestCase):
-    """get_market_status: weekday/time-of-day -> status, boundary-exact.
-
-    Boundaries come from rules.json's time_filter now, so these pass one
-    in explicitly rather than asserting against values baked into the
-    function. RULES matches the shipped file, which is why every boundary
-    below is unchanged from when they were hardcoded -- the config always
-    stated the same times it was being ignored in favour of.
-    """
-
-    RULES = {"time_filter": {"earliest_entry_et": "10:05", "latest_entry_et": "15:30",
-                             "force_close_et": "15:51"}}
-
-    def _status(self, day, hh, mm, rules=None):
-        return cycle.get_market_status(et(day, hh, mm), rules or self.RULES)
-
-    def test_saturday_is_weekend(self):
-        self.assertEqual(self._status(SATURDAY, 12, 0), "weekend")
-
-    def test_sunday_is_weekend(self):
-        self.assertEqual(self._status(SUNDAY, 12, 0), "weekend")
-
-    def test_before_the_open_is_too_early(self):
-        self.assertEqual(self._status(MONDAY, 9, 29), "too_early")
-
-    def test_from_the_open_positions_are_managed(self):
-        """Was "too_early" until 10:00, which exits the whole cycle -- so a
-        position surviving a failed force-close went unmanaged through the
-        first half hour."""
-        self.assertEqual(self._status(MONDAY, 9, 30), "manage_only")
-        self.assertEqual(self._status(MONDAY, 9, 59), "manage_only")
-
-    def test_10am_exactly_is_manage_only(self):
-        self.assertEqual(self._status(MONDAY, 10, 0), "manage_only")
-
-    def test_1004_is_manage_only(self):
-        self.assertEqual(self._status(MONDAY, 10, 4), "manage_only")
-
-    def test_1005_exactly_is_ok(self):
-        self.assertEqual(self._status(MONDAY, 10, 5), "ok")
-
-    def test_1529_is_ok(self):
-        self.assertEqual(self._status(MONDAY, 15, 29), "ok")
-
-    def test_1530_exactly_is_manage_only(self):
-        """Entry window closes at 15:30 -- that minute itself is manage_only, not ok."""
-        self.assertEqual(self._status(MONDAY, 15, 30), "manage_only")
-
-    def test_1550_is_manage_only(self):
-        self.assertEqual(self._status(MONDAY, 15, 50), "manage_only")
-
-    def test_1551_exactly_is_force_close(self):
-        self.assertEqual(self._status(MONDAY, 15, 51), "force_close")
-
-    def test_1600_exactly_is_force_close(self):
-        self.assertEqual(self._status(MONDAY, 16, 0), "force_close")
-
-    def test_1601_is_closed(self):
-        self.assertEqual(self._status(MONDAY, 16, 1), "closed")
-
-    def test_the_config_actually_moves_the_boundaries(self):
-        """The regression this replaces: all four times were hardcoded, so
-        rules.json's time_filter read as authoritative while changing it
-        did nothing whatsoever."""
-        shifted = {"time_filter": {"earliest_entry_et": "09:45", "latest_entry_et": "14:00",
-                                   "force_close_et": "15:00"}}
-        self.assertEqual(self._status(MONDAY, 9, 45, shifted), "ok")
-        self.assertEqual(self._status(MONDAY, 13, 59, shifted), "ok")
-        self.assertEqual(self._status(MONDAY, 14, 0, shifted), "manage_only")
-        self.assertEqual(self._status(MONDAY, 15, 0, shifted), "force_close")
-
-    def test_the_session_still_bounds_the_config(self):
-        """An entry window opening before the bell means "from the bell"."""
-        early = {"time_filter": {"earliest_entry_et": "08:00", "latest_entry_et": "15:30",
-                                 "force_close_et": "15:51"}}
-        self.assertEqual(self._status(MONDAY, 9, 0, early), "too_early")
-        self.assertEqual(self._status(MONDAY, 9, 30, early), "ok")
-
-    def test_it_matches_the_shipped_rules_file(self):
-        """The values under test are the ones actually in use."""
-        shipped = json.loads(Path("rules.json").read_text())
-        for hh, mm in ((9, 29), (9, 30), (10, 5), (15, 30), (15, 51), (16, 1)):
-            self.assertEqual(
-                cycle.get_market_status(et(MONDAY, hh, mm), shipped),
-                self._status(MONDAY, hh, mm),
-                f"{hh}:{mm:02d}",
-            )
-
-
 class TestFastExitCheck(unittest.TestCase):
     """The pre-import gate may only know the session, never the entry
     window -- exiting here skips position management too."""
@@ -198,36 +109,6 @@ class TestIbkrToYahoo(unittest.TestCase):
 
     def test_plain_ticker_is_unchanged(self):
         self.assertEqual(cycle.ibkr_to_yahoo("AAPL"), "AAPL")
-
-
-class TestComputeSwingLows(unittest.TestCase):
-    """compute_swing_lows: a bar is a swing low iff lower than the 2 bars
-    before AND the 2 bars after it (strict <)."""
-
-    def _bars(self, lows):
-        return pd.DataFrame({"Low": lows})
-
-    def test_single_swing_low_detected(self):
-        bars = self._bars([10, 8, 3, 8, 10])
-        self.assertEqual(cycle.compute_swing_lows(bars), [3.0])
-
-    def test_monotonic_series_has_no_swing_low(self):
-        bars = self._bars([10, 9, 8, 7, 6])
-        self.assertEqual(cycle.compute_swing_lows(bars), [])
-
-    def test_equal_neighbor_does_not_count_as_swing_low(self):
-        """Strict '<' -- a tie with a neighbor's min does not qualify."""
-        bars = self._bars([10, 9, 5, 9, 10, 9, 4, 9, 10])
-        self.assertEqual(cycle.compute_swing_lows(bars), [5.0, 4.0])
-
-    def test_too_few_bars_returns_empty(self):
-        bars = self._bars([10, 9, 8, 7])
-        self.assertEqual(cycle.compute_swing_lows(bars), [])
-
-    def test_results_are_plain_floats(self):
-        bars = self._bars([10, 8, 3, 8, 10])
-        for value in cycle.compute_swing_lows(bars):
-            self.assertIsInstance(value, float)
 
 
 def make_rules(**overrides):
@@ -934,42 +815,6 @@ class TestLoadSavePositions(unittest.TestCase):
 
         self.assertFalse(self.positions_path.with_suffix(".json.tmp").exists())
         self.assertTrue(self.positions_path.exists())
-
-
-class TestReadWatchlist(unittest.TestCase):
-    """read_watchlist: comment/blank-line stripping, inline-comment
-    trailing text, class-share tickers with embedded spaces."""
-
-    def setUp(self):
-        self._tmpdir = tempfile.TemporaryDirectory()
-        self.watchlist_path = Path(self._tmpdir.name) / "watchlist.txt"
-        self.patcher = patch.object(cycle, "WATCHLIST_PATH", self.watchlist_path)
-        self.patcher.start()
-
-    def tearDown(self):
-        self.patcher.stop()
-        self._tmpdir.cleanup()
-
-    def test_missing_file_returns_empty_list(self):
-        self.assertEqual(cycle.read_watchlist(), [])
-
-    def test_parses_tickers_skipping_blank_and_comment_lines(self):
-        self.watchlist_path.write_text(
-            "# header comment\n"
-            "\n"
-            "AAPL  # gap +5.00%\n"
-            "MSFT\n"
-            "  \n"
-            "# another comment\n"
-            "NVDA # trailing comment\n"
-        )
-
-        self.assertEqual(cycle.read_watchlist(), ["AAPL", "MSFT", "NVDA"])
-
-    def test_class_share_ticker_with_space_preserved(self):
-        self.watchlist_path.write_text("BRK B  # some note\n")
-
-        self.assertEqual(cycle.read_watchlist(), ["BRK B"])
 
 
 class TestCountTodayBuys(unittest.TestCase):

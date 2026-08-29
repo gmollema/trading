@@ -18,7 +18,15 @@ from pathlib import Path
 
 import pandas as pd
 
-from trading_bot.cli.backtest_fetch_data import DAILY_DIR, INTRADAY_DIR, safe_filename
+DAILY_DIR = Path("backtest_data/daily")
+INTRADAY_DIR = Path("backtest_data/intraday_5m")
+
+
+def safe_filename(ticker_ibkr: str) -> str:
+    """Cache filename for a ticker. Class shares carry a space ("BRK B"),
+    which is legal in a filename but awkward everywhere else."""
+    return ticker_ibkr.replace(" ", "_") + ".csv"
+
 
 SMA200_WINDOW = 200
 ET = "America/New_York"

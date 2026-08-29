@@ -28,11 +28,11 @@ import pandas as pd
 import yfinance as yf
 from ib_async import Stock
 
+from trading_bot.backtest.data import DAILY_DIR, INTRADAY_DIR, safe_filename
 from trading_bot.broker.ibkr_client import IBKRClient
 from trading_bot.data.sp500_tickers import SP500_TICKERS
 
-DAILY_DIR = Path("backtest_data/daily")
-INTRADAY_DIR = Path("backtest_data/intraday_5m")
+
 INTRADAY_PREMARKET_DIR = Path("backtest_data/intraday_5m_premarket")
 
 DAILY_PERIOD = "2y"
@@ -48,10 +48,6 @@ FETCH_CLIENT_ID = 95
 
 def ibkr_to_yahoo(ticker: str) -> str:
     return ticker.replace(" ", "-")
-
-
-def safe_filename(ticker_ibkr: str) -> str:
-    return ticker_ibkr.replace(" ", "_") + ".csv"
 
 
 def fetch_daily(ticker_ibkr: str, daily_dir: Path = DAILY_DIR, end_date: str | None = None) -> str:

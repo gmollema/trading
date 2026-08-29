@@ -22,7 +22,7 @@ import pandas as pd
 
 from trading_bot.backtest import filters, portfolio
 from trading_bot.backtest.data import DAILY_DIR, INTRADAY_DIR, build_symbol_frame
-from trading_bot.cli.cycle import get_market_status
+from trading_bot.live import get_market_status
 
 DEFAULT_MAX_POSITION_PCT = 10.0
 

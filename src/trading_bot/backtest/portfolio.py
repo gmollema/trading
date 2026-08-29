@@ -15,7 +15,7 @@ import math
 
 import pandas as pd
 
-from trading_bot.cli.cycle import compute_swing_lows
+from trading_bot.live import compute_swing_lows
 
 
 DEFAULT_COMMISSION_PER_SHARE = 0.005
