@@ -7,11 +7,16 @@ the reasoning that the fill bar already prices the chase and only spread
 and impact are left. That number is borrowed from the stop leg -- a market
 execution that does not chase -- and has never been measured on an entry.
 
-It decides the answer. At the configured spec the strategy returns +0.93%
-out of sample with commission; the same legs at the 48-79 bps the early
-TP1 fills gave up would put it clearly negative. So this reads the live
-log and reports the real distribution per leg, next to the rate the
-backtest charged for it.
+It decides the answer, and the margin is about a basis point and a half.
+At the configured spec the strategy returns +0.23% out of sample with
+every leg slipped and tiered commission, and smc_entry_breakeven puts the
+zero crossing at ~3.5 bps of entry slippage -- against the 2.0 it is
+being credited with. So this reads the live log and reports the real
+distribution per leg, next to the rate the backtest charged for it.
+
+(The +0.93% quoted in some commit messages is smc_full_backtest's
+commission_tiered row, which leaves fills costless. Different basis, four
+times the number; the all-in figure is the one that decides anything.)
 
 Expect it to be empty at first, and that is not a bug. The fields it reads
 landed on 2026-08-27/28 (commits eb643ac, 80103eb), after every fill in
@@ -31,6 +36,7 @@ Three legs, and they are not equally well founded:
 
 Usage:
     python -m trading_bot.cli.smc_fill_audit
+    python -m trading_bot.cli.smc_fill_audit --notify   # scheduled run
 """
 
 from __future__ import annotations
@@ -45,6 +51,38 @@ from trading_bot.cli.smc_full_backtest import leg_slippage
 
 # Which backtest leg each measurement should be compared against.
 LEG_FOR = {"entry": "entry", "tp1": "tp1", "stop": "stop"}
+
+# Where summed out-of-sample return crosses zero as the ENTRY rate rises,
+# on the tiered schedule this account pays -- from smc_entry_breakeven,
+# whose whole purpose is to give the measurement below something to be
+# judged against. Re-run that sweep if the strategy or the cost model
+# changes; a stale threshold here is worse than none, because it looks
+# authoritative.
+BREAKEVEN_ENTRY_BPS = 3.5
+
+
+def notify_line(stat: dict | None, breakeven_bps: float, min_samples: int) -> tuple[str, str]:
+    """(title, body) for the push, phrased so the verdict survives being
+    read on a phone weeks from now with none of this context."""
+    if stat is None or stat["n"] < min_samples:
+        n = 0 if stat is None else stat["n"]
+        return (
+            "SMC fill audit: not enough fills yet",
+            f"{n} entry fills logged, need {min_samples}. Nothing to conclude -- leave it running.",
+        )
+    median = stat["median"]
+    if median <= breakeven_bps:
+        return (
+            "SMC fill audit: entry slippage clears break-even",
+            f"median {median:.1f} bps over {stat['n']} fills, under the {breakeven_bps} bps "
+            f"break-even. The strategy is marginally viable on this evidence -- and only "
+            f"marginally: out-of-sample return at the modelled rate was +0.23%.",
+        )
+    return (
+        "SMC fill audit: entry slippage exceeds break-even",
+        f"median {median:.1f} bps over {stat['n']} fills, above the {breakeven_bps} bps "
+        f"break-even. The strategy is losing money as configured. Stop it or respec the entry.",
+    )
 
 
 def read_events(path: Path) -> list[dict]:
@@ -160,6 +198,10 @@ def main() -> int:
     parser.add_argument("--min-samples", type=int, default=8,
                         help="fills needed before this will call a leg either way")
     parser.add_argument("--show", action="store_true", help="list every measured fill")
+    parser.add_argument("--breakeven-bps", type=float, default=BREAKEVEN_ENTRY_BPS,
+                        help="entry rate at which out-of-sample return crosses zero")
+    parser.add_argument("--notify", action="store_true",
+                        help="push the entry-leg verdict (for the scheduled run)")
     args = parser.parse_args()
 
     events = read_events(args.log)
@@ -191,6 +233,18 @@ def main() -> int:
                 lag = f"  lag {s['bars_since_touch']} bars" if s.get("bars_since_touch") is not None else ""
                 print(f"  {leg:6s} {s['symbol']:6s} {s['when']}  "
                       f"level {s['level']:.2f} -> fill {s['fill']:.2f}  {s['bps']:+.1f} bps{lag}")
+
+    if args.notify:
+        # Imported here rather than at module scope: notifier pulls in
+        # requests and reads .env at import, and this tool is useful --
+        # and used interactively -- without ever sending anything.
+        from trading_bot.util.notifier import notify
+
+        entry_stat = summarize(measured["entry"])
+        title, body = notify_line(entry_stat, args.breakeven_bps, args.min_samples)
+        priority = "high" if entry_stat and entry_stat["n"] >= args.min_samples else "default"
+        notify(title, body, priority)
+        print(f"\npushed: {title}")
 
     print("\nPositive bps is adverse in every row: a buy filled above its level, a sell below it.")
     print("The entry leg is the one that matters -- its rate was never measured, only borrowed "

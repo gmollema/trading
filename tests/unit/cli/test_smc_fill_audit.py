@@ -130,3 +130,45 @@ class VerdictTest(unittest.TestCase):
         """48-79 bps is what the early TP1 market orders actually gave up."""
         stat = {"n": 10, "median": 60.0, "mean": 60.0, "min": 48.0, "max": 79.0}
         self.assertIn("do not survive", audit.verdict(stat, 2.0, 8))
+
+
+class NotifyLineTest(unittest.TestCase):
+    """The push has to carry its own verdict: it is read on a phone weeks
+    later, by someone with none of this context in front of them."""
+
+    BREAKEVEN = audit.BREAKEVEN_ENTRY_BPS
+
+    def test_no_samples_says_keep_waiting(self):
+        title, body = audit.notify_line(None, self.BREAKEVEN, 8)
+        self.assertIn("not enough fills", title)
+        self.assertIn("0 entry fills", body)
+
+    def test_too_few_samples_does_not_call_it(self):
+        stat = {"n": 3, "median": 40.0}
+        title, body = audit.notify_line(stat, self.BREAKEVEN, 8)
+        self.assertIn("not enough fills", title)
+        self.assertNotIn("40", body)  # no verdict leaks out of a sample this thin
+
+    def test_under_the_threshold_reads_as_viable_but_says_how_thin(self):
+        title, body = audit.notify_line({"n": 12, "median": 2.4}, self.BREAKEVEN, 8)
+        self.assertIn("clears break-even", title)
+        self.assertIn("marginal", body)
+
+    def test_over_the_threshold_says_what_to_do(self):
+        title, body = audit.notify_line({"n": 12, "median": 9.1}, self.BREAKEVEN, 8)
+        self.assertIn("exceeds break-even", title)
+        self.assertIn("losing money", body)
+
+    def test_the_boundary_counts_as_clearing_it(self):
+        title, _ = audit.notify_line({"n": 12, "median": self.BREAKEVEN}, self.BREAKEVEN, 8)
+        self.assertIn("clears break-even", title)
+
+    def test_every_message_names_the_threshold_it_judged_against(self):
+        for stat in (None, {"n": 3, "median": 1.0}, {"n": 12, "median": 1.0}, {"n": 12, "median": 99.0}):
+            title, body = audit.notify_line(stat, self.BREAKEVEN, 8)
+            self.assertTrue(str(self.BREAKEVEN) in body or "need 8" in body, title)
+
+    def test_the_threshold_matches_the_sweep_that_produced_it(self):
+        """A stale constant here would look authoritative while being
+        wrong -- worse than having no threshold at all."""
+        self.assertEqual(audit.BREAKEVEN_ENTRY_BPS, 3.5)
