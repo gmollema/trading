@@ -26,6 +26,12 @@ against build_smc_candidates over full history.
 
 Usage:
     python -m trading_bot.cli.smc_signal_parity --start 2026-06-01 --end 2026-08-28
+    python -m trading_bot.cli.smc_signal_parity --days 30 --notify   # scheduled
+
+The window is anchored to the newest session in the cache rather than to
+today, because the cache only advances when someone runs a fetch and a
+scheduled check against dates with no bars would report a parity of zero
+over nothing. The push says how old that session is for the same reason.
 """
 
 from __future__ import annotations
@@ -87,8 +93,15 @@ def main() -> int:
     parser.add_argument("--intraday-dir", type=Path, default=Path("backtest_data/intraday_5m"))
     parser.add_argument("--daily-dir", type=Path, default=DAILY_DIR)
     parser.add_argument("--rules", type=Path, default=Path("smc_rules.json"))
-    parser.add_argument("--start", type=str, required=True, help="YYYY-MM-DD")
-    parser.add_argument("--end", type=str, required=True, help="YYYY-MM-DD")
+    parser.add_argument("--start", type=str, default=None, help="YYYY-MM-DD")
+    parser.add_argument("--end", type=str, default=None,
+                        help="YYYY-MM-DD; defaults to the newest session in the cache")
+    parser.add_argument("--days", type=int, default=30,
+                        help="rolling window ending at --end, used when --start is omitted")
+    parser.add_argument("--notify", action="store_true",
+                        help="push the capture rate (for the scheduled run)")
+    parser.add_argument("--alert-below-pct", type=float, default=35.0,
+                        help="capture rate under this pushes at high priority")
     parser.add_argument("--window-days", type=int, default=LIVE_WINDOW_DAYS,
                         help="what the live bot fetches; raising it does not make the two agree")
     parser.add_argument("--out", type=Path, default=Path("smc_signal_parity.csv"))
@@ -97,10 +110,18 @@ def main() -> int:
     rules = json.loads(args.rules.read_text())
     entry, exit_ = smc_live.entry_rules(rules), smc_live.exit_rules(rules)
     tf = rules["time_filter"]
-    start = datetime.date.fromisoformat(args.start)
-    end = datetime.date.fromisoformat(args.end)
-
     watchlist = watchlist_from_rules(list(SP500_TICKERS), args.daily_dir, rules)
+
+    # Anchored to the cache, not to today. A scheduled run on a cache
+    # nobody has refreshed would otherwise ask about days that hold no
+    # bars and report a parity of zero over an empty window.
+    dated = sorted(d for d in watchlist if watchlist[d])
+    if not dated:
+        print("no watchlist dates -- is the daily cache present?")
+        return 1
+    end = datetime.date.fromisoformat(args.end) if args.end else dated[-1]
+    start = (datetime.date.fromisoformat(args.start) if args.start
+             else end - datetime.timedelta(days=args.days))
     sessions = {d for d in watchlist if start <= d <= end and watchlist[d]}
     tickers = sorted(set().union(*(watchlist[d] for d in sessions))) if sessions else []
     if not tickers:
@@ -149,7 +170,7 @@ def main() -> int:
             + [{"symbol": s, "bar": t, "seen": "backtest_only"} for s, t in sorted(only_bt)])
     pd.DataFrame(rows).to_csv(args.out, index=False)
 
-    print(f"\n===== SIGNAL PARITY, {args.start} to {args.end} =====")
+    print(f"\n===== SIGNAL PARITY, {start} to {end} =====")
     print(f"  backtest signals : {len(backtest)}")
     print(f"  live signals     : {len(live)}")
     print(f"  agree            : {len(both)}")
@@ -162,6 +183,29 @@ def main() -> int:
     by_month = collections.Counter(t.tz_convert(ET).strftime("%Y-%m") for _, t in only_bt)
     if by_month:
         print(f"\n  misses by month: {dict(sorted(by_month.items()))}")
+    if args.notify:
+        # Imported here rather than at module scope: notifier pulls in
+        # requests and reads .env at import, and this tool is used
+        # interactively far more often than it is scheduled.
+        from trading_bot.util.notifier import notify
+
+        rate = len(both) / len(backtest) * 100 if backtest else float("nan")
+        stale = (datetime.date.today() - end).days
+        if not backtest:
+            notify("SMC signal parity: nothing to compare",
+                   f"No backtest signals between {start} and {end}. "
+                   f"Cache newest session is {end} ({stale}d old).", "default")
+        else:
+            low = rate < args.alert_below_pct
+            notify(
+                f"SMC signal parity: live sees {rate:.0f}% of signals",
+                f"{len(both)} of {len(backtest)} backtest signals reproduced by the live path "
+                f"over {start} to {end}, {len(only_bt)} missed. Baseline measured 2026-08-30 was "
+                f"46%. Cache newest session {end} ({stale}d old).",
+                "high" if low else "default",
+            )
+        print(f"\npushed: live sees {rate:.0f}% of signals")
+
     print(f"\nwrote {args.out}")
     return 0
 
