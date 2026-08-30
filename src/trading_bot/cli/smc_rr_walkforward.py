@@ -254,12 +254,18 @@ def main() -> int:
     thresholds = [float(t) for t in args.thresholds.split(",")]
 
     print(f"building candidates over {len(tickers)} tickers (once, reused across the grid)...")
+    # Pinned to "level" so this reproduces the numbers it was committed
+    # with. Its finding -- that min-R:R filtering is monotonically worse
+    # out of sample -- was measured on that basis, and re-running it on
+    # today's default would quietly answer a different question.
     candidates = build_smc_candidates(
         tickers,
         intraday_dir=args.intraday_dir,
         time_window_bars=rules["time_window_bars"],
         tp1_fraction=rules["tp1_fraction"],
         swing_window=rules["swing_window"],
+        entry_fill="level",
+        exit_fill="level",
     )
     no_tp1 = sum(1 for c in candidates if signal_rr(c[2]) is None)
     print(f"{len(candidates)} candidates; {no_tp1} ({no_tp1 / max(len(candidates), 1) * 100:.1f}%) "

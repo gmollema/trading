@@ -56,7 +56,12 @@ class TestRunSmcBacktestSingleSymbol(unittest.TestCase):
     def test_single_trade_sized_and_closed_correctly(self):
         _write_intraday_csv(self.intraday_dir / "TEST.csv", LIFECYCLE_ROWS)
 
-        result = run_smc_backtest(["TEST"], 100_000, risk_pct=1.0, max_position_pct=10.0, intraday_dir=self.intraday_dir)
+        # Pinned to the level spec: this asserts the hand-traced fixture's
+        # exact entry price (11 = the OB high). The module default moved to
+        # the reachable spec on 2026-08-30, which fills at 13.
+        result = run_smc_backtest(["TEST"], 100_000, risk_pct=1.0, max_position_pct=10.0,
+                                  intraday_dir=self.intraday_dir,
+                                  entry_fill="level", exit_fill="level")
         trades = result["trades"]
 
         self.assertEqual(len(trades), 2)
@@ -98,12 +103,13 @@ class TestRunSmcBacktestSingleSymbol(unittest.TestCase):
         # (whole-share) backtest takes no trade at all.
         whole_shares = run_smc_backtest(
             ["TEST"], 10, risk_pct=1.0, max_position_pct=10.0, intraday_dir=self.intraday_dir,
+            entry_fill="level", exit_fill="level",
         )
         self.assertEqual(whole_shares["trades"], [])
 
         fractional = run_smc_backtest(
             ["TEST"], 10, risk_pct=1.0, max_position_pct=10.0, intraday_dir=self.intraday_dir,
-            allow_fractional_shares=True,
+            allow_fractional_shares=True, entry_fill="level", exit_fill="level",
         )
         self.assertEqual(len(fractional["trades"]), 2)
         buy, sell = fractional["trades"]

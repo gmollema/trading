@@ -112,7 +112,7 @@ class TestFindSmcLongTrades(unittest.TestCase):
         ]
         bars = _bars(rows)
 
-        trades = smc.find_smc_long_trades(bars)
+        trades = smc.find_smc_long_trades(bars, entry_fill="level", exit_fill="level")
 
         self.assertEqual(len(trades), 1)
         trade = trades[0]
@@ -141,7 +141,7 @@ class TestFindSmcLongTrades(unittest.TestCase):
         ]
         bars = _bars(rows)
 
-        trades = smc.find_smc_long_trades(bars)
+        trades = smc.find_smc_long_trades(bars, entry_fill="level", exit_fill="level")
 
         self.assertEqual(len(trades), 1)
         fill = trades[0]["fills"][0]
@@ -209,12 +209,12 @@ class TestForceCloseSameDay(unittest.TestCase):
         idx 11's new_high_exit."""
         bars = _bars_with_day_boundary(self.LIFECYCLE_ROWS, day_boundary_idx=10)
 
-        baseline = smc.find_smc_long_trades(bars, force_close_same_day=False)
+        baseline = smc.find_smc_long_trades(bars, force_close_same_day=False, entry_fill="level", exit_fill="level")
         self.assertEqual(len(baseline), 1)
         self.assertEqual(baseline[0]["fills"][0]["reason"], "new_high_exit")
         self.assertEqual(baseline[0]["fills"][0]["idx"], 11)
 
-        forced = smc.find_smc_long_trades(bars, force_close_same_day=True)
+        forced = smc.find_smc_long_trades(bars, force_close_same_day=True, entry_fill="level", exit_fill="level")
         self.assertEqual(len(forced), 1)
         trade = forced[0]
         self.assertEqual(trade["entry_idx"], 8)
@@ -234,10 +234,10 @@ class TestForceCloseSameDay(unittest.TestCase):
         OB's top (11) in this fixture, no trade is taken at all."""
         bars = _bars_with_day_boundary(self.LIFECYCLE_ROWS, day_boundary_idx=9)
 
-        baseline = smc.find_smc_long_trades(bars, force_close_same_day=False)
+        baseline = smc.find_smc_long_trades(bars, force_close_same_day=False, entry_fill="level", exit_fill="level")
         self.assertEqual(len(baseline), 1)  # sanity check against the ordinary lifecycle test
 
-        forced = smc.find_smc_long_trades(bars, force_close_same_day=True)
+        forced = smc.find_smc_long_trades(bars, force_close_same_day=True, entry_fill="level", exit_fill="level")
         self.assertEqual(forced, [])
 
 
@@ -324,7 +324,7 @@ class TestSlippage(unittest.TestCase):
 
     def test_buy_slips_up_and_sell_slips_down(self):
         bars = _bars(self.LIFECYCLE_ROWS)
-        trades = smc.find_smc_long_trades(bars, slippage_bps={"entry": 100, "new_high_exit": 100})
+        trades = smc.find_smc_long_trades(bars, entry_fill="level", exit_fill="level", slippage_bps={"entry": 100, "new_high_exit": 100})
         self.assertEqual(len(trades), 1)
         trade = trades[0]
         self.assertEqual(trade["entry_idx"], 8)  # same bar as the frictionless run
@@ -342,7 +342,7 @@ class TestSlippage(unittest.TestCase):
 
     def test_stop_triggers_on_the_true_level_but_fills_worse(self):
         bars = _bars(self.STOP_OUT_ROWS)
-        trades = smc.find_smc_long_trades(bars, slippage_bps={"stop": 50})
+        trades = smc.find_smc_long_trades(bars, entry_fill="level", exit_fill="level", slippage_bps={"stop": 50})
         fill = trades[0]["fills"][0]
         self.assertEqual(fill["reason"], "stop")
         self.assertEqual(fill["idx"], 9)  # unchanged trigger bar
@@ -350,7 +350,7 @@ class TestSlippage(unittest.TestCase):
 
     def test_scalar_applies_to_every_leg(self):
         bars = _bars(self.LIFECYCLE_ROWS)
-        trade = smc.find_smc_long_trades(bars, slippage_bps=100)[0]
+        trade = smc.find_smc_long_trades(bars, entry_fill="level", exit_fill="level", slippage_bps=100)[0]
         self.assertAlmostEqual(trade["entry_price"], 11 * 1.01)
         self.assertAlmostEqual(trade["fills"][0]["price"], 17 * 0.99)
 
@@ -504,8 +504,18 @@ class TestEntryFill(unittest.TestCase):
         (13, 16, 13, 15), (15, 19, 15, 18), (18, 25, 17, 17), (17, 20, 15, 16), (16, 18, 13, 14),
     ]
 
-    def test_level_is_the_default_and_unchanged(self):
+    def test_the_default_is_the_reachable_spec(self):
+        """Flipped on 2026-08-30. A default nobody can execute is how this
+        repo came to publish +97.2% for a strategy worth about +0.2%, so
+        forgetting to pass a spec now yields a fill an order could get."""
+        self.assertEqual(smc.DEFAULT_ENTRY_FILL, "next_open")
+        self.assertEqual(smc.DEFAULT_EXIT_FILL, "next_open")
         trades = smc.find_smc_long_trades(_bars(self.LIFECYCLE_ROWS))
+        self.assertEqual(trades[0]["entry_idx"], 9)
+        self.assertEqual(trades[0]["entry_price"], 13)
+
+    def test_level_still_available_when_asked_for(self):
+        trades = smc.find_smc_long_trades(_bars(self.LIFECYCLE_ROWS), entry_fill="level")
         self.assertEqual(trades[0]["entry_idx"], 8)
         self.assertEqual(trades[0]["entry_price"], 11)
 
@@ -551,7 +561,7 @@ class TestEntryFill(unittest.TestCase):
         padded = [(10, 10, 9, 10)] * 2 + list(self.LIFECYCLE_ROWS)
         rows = padded[:11]  # ends on the retest bar (idx 8 + 2 padding)
         self.assertEqual(smc.find_smc_long_trades(_bars(rows), entry_fill="next_open"), [])
-        self.assertEqual(len(smc.find_smc_long_trades(_bars(rows))), 1)  # level still fills
+        self.assertEqual(len(smc.find_smc_long_trades(_bars(rows), entry_fill="level")), 1)
 
     def test_no_trade_across_a_session_boundary(self):
         """An order placed at a day's close is not live at the next open,
@@ -594,13 +604,13 @@ class TestRequireObReclaim(unittest.TestCase):
     )
 
     def test_bar_closing_back_above_the_level_still_trades(self):
-        trades = smc.find_smc_long_trades(_bars(self.ROWS_RECLAIMED), require_ob_reclaim=True)
+        trades = smc.find_smc_long_trades(_bars(self.ROWS_RECLAIMED), require_ob_reclaim=True, entry_fill="level", exit_fill="level")
         self.assertEqual(len(trades), 1)
         self.assertEqual(trades[0]["entry_idx"], 8)
 
     def test_bar_closing_below_the_level_is_skipped(self):
         bars = _bars(self.ROWS_REJECTED)
-        self.assertEqual(len(smc.find_smc_long_trades(bars)), 1)  # unfiltered still takes it
+        self.assertEqual(len(smc.find_smc_long_trades(bars, entry_fill="level")), 1)
         self.assertEqual(smc.find_smc_long_trades(bars, require_ob_reclaim=True), [])
 
     def test_a_rejected_retest_still_mitigates_the_order_block(self):
@@ -648,11 +658,11 @@ class TestExitFill(unittest.TestCase):
         rows = list(self.LIFECYCLE_ROWS) + [(14, 15, 13, 14)]  # idx 14, the fill bar
         bars = _bars(rows)
 
-        level = smc.find_smc_long_trades(bars)[0]["fills"][0]
+        level = smc.find_smc_long_trades(bars, exit_fill="level", entry_fill="level")[0]["fills"][0]
         self.assertEqual(level["idx"], 11)              # the pivot bar
         self.assertEqual(level["price"], 17)            # its close
 
-        reachable = smc.find_smc_long_trades(bars, exit_fill="next_open")[0]["fills"][0]
+        reachable = smc.find_smc_long_trades(bars, exit_fill="next_open", entry_fill="level")[0]["fills"][0]
         self.assertEqual(reachable["reason"], "new_high_exit")
         self.assertEqual(reachable["idx"], 14)          # the bar after confirmation at 13
         self.assertEqual(reachable["price"], 14)        # opens[14]
@@ -672,7 +682,7 @@ class TestExitFill(unittest.TestCase):
         others it earns its level."""
         rows = list(self.LIFECYCLE_ROWS)
         rows[9] = (13, 13, 5, 6)  # trades down through the stop at 8, opening above it
-        fill = smc.find_smc_long_trades(_bars(rows), exit_fill="next_open")[0]["fills"][0]
+        fill = smc.find_smc_long_trades(_bars(rows), exit_fill="next_open", entry_fill="level")[0]["fills"][0]
         self.assertEqual(fill["reason"], "stop")
         self.assertEqual(fill["price"], 8)
 
@@ -682,8 +692,8 @@ class TestExitFill(unittest.TestCase):
         rows[9] = (6, 7, 5, 6)  # opens at 6, below the stop at 8
         bars = _bars(rows)
 
-        self.assertEqual(smc.find_smc_long_trades(bars)[0]["fills"][0]["price"], 8)
-        gapped = smc.find_smc_long_trades(bars, exit_fill="next_open")[0]["fills"][0]
+        self.assertEqual(smc.find_smc_long_trades(bars, entry_fill="level", exit_fill="level")[0]["fills"][0]["price"], 8)
+        gapped = smc.find_smc_long_trades(bars, exit_fill="next_open", entry_fill="level")[0]["fills"][0]
         self.assertEqual(gapped["reason"], "stop")
         self.assertEqual(gapped["price"], 6)
 
@@ -693,12 +703,12 @@ class TestExitFill(unittest.TestCase):
         its close is nine minutes of hindsight."""
         bars = _bars_with_day_boundary(self.LIFECYCLE_ROWS, day_boundary_idx=10)
 
-        level = smc.find_smc_long_trades(bars, force_close_same_day=True)[0]["fills"][0]
+        level = smc.find_smc_long_trades(bars, force_close_same_day=True, entry_fill="level", exit_fill="level")[0]["fills"][0]
         self.assertEqual(level["reason"], "same_day_force_close")
         self.assertEqual(level["price"], self.LIFECYCLE_ROWS[9][3])  # closes[9]
 
         reachable = smc.find_smc_long_trades(
-            bars, force_close_same_day=True, exit_fill="next_open",
+            bars, force_close_same_day=True, exit_fill="next_open", entry_fill="level",
         )[0]["fills"][0]
         self.assertEqual(reachable["reason"], "same_day_force_close")
         self.assertEqual(reachable["idx"], 9)
@@ -742,6 +752,10 @@ class TestTp1ExitFill(unittest.TestCase):
     TP1_TOUCH_IDX = 16
 
     def _trades(self, **kwargs):
+        # entry pinned to "level" so the fixture's traced entry index and
+        # price stay the subject; this suite is about the EXIT legs.
+        kwargs.setdefault("entry_fill", "level")
+        kwargs.setdefault("exit_fill", "level")
         return smc.find_smc_long_trades(_bars(self.ROWS), **kwargs)
 
     def test_fixture_produces_a_tp1(self):
@@ -797,7 +811,7 @@ class TestEntryAllowed(unittest.TestCase):
 
     def test_allowed_entry_bar_still_trades(self):
         trades = smc.find_smc_long_trades(
-            _bars(self.LIFECYCLE_ROWS), entry_allowed=self._mask(set()),
+            _bars(self.LIFECYCLE_ROWS), entry_allowed=self._mask(set()), entry_fill="level",
         )
         self.assertEqual(trades[0]["entry_idx"], self.ENTRY_IDX)
 

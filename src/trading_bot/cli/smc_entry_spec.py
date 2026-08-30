@@ -154,6 +154,10 @@ def build_all(tickers, intraday_dir: Path, rules: dict, specs=ENTRY_SPECS, bases
                 slippage_bps=slippage,
                 entry_fill=spec["entry_fill"],
                 require_ob_reclaim=spec["reclaim"],
+                # Frozen at "level" -- see the note above about holding
+                # every other axis where it was when the results file was
+                # written. This used to come from the default.
+                exit_fill="level",
             )
             print(f"  {len(seen[key])} candidates", flush=True)
         for basis in bases:

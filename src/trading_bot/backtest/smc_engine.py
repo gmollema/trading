@@ -487,6 +487,10 @@ def run_smc_backtest(
     slippage_bps: dict | float | None = None,
     post_tp1_stop_fraction: float = DEFAULT_POST_TP1_STOP_FRACTION,
     exit_fully_at_tp1: bool = False,
+    entry_fill: str = DEFAULT_ENTRY_FILL,
+    require_ob_reclaim: bool = False,
+    exit_fill: str = DEFAULT_EXIT_FILL,
+    tp1_resting_limit: bool = False,
     reactive_derisk_window: int | None = None,
     reactive_derisk_pf_threshold: float = DEFAULT_REACTIVE_DERISK_PF_THRESHOLD,
     reactive_derisk_size_mult: float = DEFAULT_REACTIVE_DERISK_SIZE_MULT,
@@ -500,11 +504,18 @@ def run_smc_backtest(
     simulate_smc_portfolio() in a single call, for callers that don't need
     to reuse the (expensive) candidate-generation step across multiple
     portfolio-level parameter variations. See those two functions for the
-    full parameter docs."""
+    full parameter docs.
+
+    The execution-spec arguments (entry_fill, require_ob_reclaim,
+    exit_fill, tp1_resting_limit) were not forwarded until 2026-08-30, so
+    this wrapper silently produced whatever the signal layer defaulted to
+    and gave callers no way to choose. That is the same defect as the
+    default itself, one layer up."""
     candidates = build_smc_candidates(
         tickers, intraday_dir, time_window_bars, tp1_fraction, swing_window, require_confirmed_trend,
         daily_trend_filter, daily_dir, force_close_same_day, slippage_bps,
         post_tp1_stop_fraction, exit_fully_at_tp1,
+        entry_fill, require_ob_reclaim, exit_fill, tp1_resting_limit,
     )
     return simulate_smc_portfolio(
         candidates, initial_capital, risk_pct, max_position_pct, max_concurrent_positions,

@@ -129,11 +129,18 @@ def analyse(tickers, intraday_dir: Path, rules: dict, models=FILL_MODELS) -> pd.
         if df is None or df.empty:
             continue
         bars = bars_dict(df)
+        # Pinned to "level" rather than taking the default: this module's
+        # committed cohort figures were produced on it, and the question
+        # it asks -- where a resting limit would have filled -- is defined
+        # against the trigger price, not against whatever the configured
+        # spec now pays.
         trades = find_smc_long_trades(
             bars,
             rules["time_window_bars"],
             rules["tp1_fraction"],
             rules["swing_window"],
+            entry_fill="level",
+            exit_fill="level",
         )
         if not trades:
             continue

@@ -126,8 +126,11 @@ class CostBasesForTest(unittest.TestCase):
                 bases = {b["name"]: b for b in f.cost_bases_for(entry_fill, exit_fill)}
                 self.assertIsNone(bases["zero_cost"]["slippage"])
 
-    def test_defaults_reproduce_the_historical_basis(self):
-        bases = {b["name"]: b for b in f.cost_bases_for("level")}
+    def test_the_all_level_basis_reproduces_the_historical_rates(self):
+        """Both fills must be named now: the module defaults moved to the
+        reachable spec on 2026-08-30, so "historical" is a choice rather
+        than what you get by omission."""
+        bases = {b["name"]: b for b in f.cost_bases_for("level", "level")}
         self.assertEqual(bases["realistic_tiered"]["slippage"], f.MEASURED_SLIPPAGE)
 
     def test_the_module_constant_is_not_mutated(self):

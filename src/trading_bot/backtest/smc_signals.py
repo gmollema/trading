@@ -171,7 +171,14 @@ def _slipped(price: float, bps: float, side: str) -> float:
 # The live cycle currently fires ~2 minutes into the fill bar, so its true
 # fill sits between the two, nearer next_open the earlier the cycle runs.
 ENTRY_FILLS = ("level", "next_open", "next_high")
-DEFAULT_ENTRY_FILL = "level"
+# The reachable spec is the default, so forgetting to pass one gives a
+# figure an order could have got. It was "level" until 2026-08-30, kept
+# that way to reproduce historical numbers -- but those live in commit
+# messages now, and a default nobody can execute is how this repo came to
+# publish +97.2% for a strategy worth about +0.2%. Callers that genuinely
+# want the trigger-as-fill basis say so explicitly; grep for
+# entry_fill="level" to find them, and each says why.
+DEFAULT_ENTRY_FILL = "next_open"
 
 
 def _same_session(dates: list, a: int, b: int) -> bool:
@@ -222,7 +229,8 @@ def _is_last_bar_of_day(dates: list, i: int, n: int) -> bool:
 # exit is not optional the way an entry is -- so it fills at the closing
 # price of the bar that revealed it.
 EXIT_FILLS = ("level", "next_open")
-DEFAULT_EXIT_FILL = "level"
+# Same reasoning as DEFAULT_ENTRY_FILL above.
+DEFAULT_EXIT_FILL = "next_open"
 
 
 def _delayed_exit_fill(opens: list, closes: list, dates: list, i: int, n: int) -> tuple[int, float]:
@@ -690,6 +698,7 @@ def latest_entry_signal(
     for trade in find_smc_long_trades(
         bars, time_window_bars, tp1_fraction, swing_window, require_confirmed_trend,
         force_close_same_day=False, require_ob_reclaim=require_ob_reclaim,
+        entry_fill="level",
     ):
         if trade["entry_idx"] == n - 1:
             return trade

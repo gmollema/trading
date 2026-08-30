@@ -163,10 +163,12 @@ class TestEntryRules(unittest.TestCase):
     """The entry spec is read from config by both the live bot and the
     backtests, so it has exactly one reading."""
 
-    def test_missing_block_keeps_the_original_spec(self):
+    def test_a_missing_block_gets_the_reachable_spec(self):
+        """The config default tracks the code default: omitting the block
+        should never hand back a basis nothing can execute."""
         self.assertEqual(
             smc_live.entry_rules({}),
-            {"fill": "level", "require_ob_reclaim": False},
+            {"fill": "next_open", "require_ob_reclaim": False},
         )
 
     def test_partial_block_is_filled_in(self):
@@ -190,10 +192,10 @@ class TestEntryRules(unittest.TestCase):
 
 
 class TestExitRules(unittest.TestCase):
-    def test_missing_block_keeps_the_original_spec(self):
+    def test_a_missing_block_gets_the_reachable_spec(self):
         self.assertEqual(
             smc_live.exit_rules({}),
-            {"fill": "level", "tp1_resting_limit": False},
+            {"fill": "next_open", "tp1_resting_limit": False},
         )
 
     def test_partial_block_is_filled_in(self):
