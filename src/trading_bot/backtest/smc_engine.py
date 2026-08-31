@@ -23,6 +23,7 @@ from trading_bot.backtest import portfolio
 from trading_bot.backtest.data import DAILY_DIR, INTRADAY_DIR, compute_daily_context, load_daily, load_intraday
 from trading_bot.backtest.smc_signals import (
     BAR_INTERVAL_MINUTES,
+    DEFAULT_EARLY_RETEST,
     DEFAULT_ENTRY_FILL,
     DEFAULT_EXIT_FILL,
     DEFAULT_POST_TP1_STOP_FRACTION,
@@ -209,6 +210,7 @@ def build_smc_candidates(
     tp1_resting_limit: bool = False,
     daily_watchlist: dict | None = None,
     entry_window_et: tuple | None = None,
+    early_retest: str = DEFAULT_EARLY_RETEST,
 ) -> list[tuple]:
     """Per-symbol signal generation only (see module docstring, phase 1) --
     independent of everything portfolio-level (equity, sizing, concurrency,
@@ -271,6 +273,7 @@ def build_smc_candidates(
             bars, time_window_bars, tp1_fraction, swing_window, require_confirmed_trend,
             force_close_same_day, slippage_bps, post_tp1_stop_fraction, exit_fully_at_tp1,
             entry_fill, require_ob_reclaim, exit_fill, tp1_resting_limit, entry_allowed,
+            early_retest,
         ):
             entry_day = trade["entry_date"].date()
             if uptrend_dates is not None and entry_day not in uptrend_dates:
@@ -499,6 +502,7 @@ def run_smc_backtest(
     allow_fractional_shares: bool = False,
     fractional_commission_pct: float = portfolio.DEFAULT_FRACTIONAL_COMMISSION_PCT,
     fractional_commission_min: float = portfolio.DEFAULT_FRACTIONAL_COMMISSION_MIN,
+    early_retest: str = DEFAULT_EARLY_RETEST,
 ) -> dict:
     """Convenience one-shot wrapper: build_smc_candidates() +
     simulate_smc_portfolio() in a single call, for callers that don't need
@@ -516,6 +520,7 @@ def run_smc_backtest(
         daily_trend_filter, daily_dir, force_close_same_day, slippage_bps,
         post_tp1_stop_fraction, exit_fully_at_tp1,
         entry_fill, require_ob_reclaim, exit_fill, tp1_resting_limit,
+        early_retest=early_retest,
     )
     return simulate_smc_portfolio(
         candidates, initial_capital, risk_pct, max_position_pct, max_concurrent_positions,

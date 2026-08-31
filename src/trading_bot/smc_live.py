@@ -25,8 +25,10 @@ import pandas as pd
 from trading_bot.backtest import portfolio
 from trading_bot.util.market_hours import MARKET_CLOSE_ET, MARKET_OPEN_ET
 from trading_bot.backtest.smc_signals import (
+    DEFAULT_EARLY_RETEST,
     DEFAULT_ENTRY_FILL,
     DEFAULT_EXIT_FILL,
+    EARLY_RETESTS,
     ENTRY_FILLS,
     EXIT_FILLS,
 )
@@ -47,7 +49,8 @@ def load_smc_rules(path: Path = SMC_RULES_PATH) -> dict:
 # What smc_rules.json's "entry" block means when it is absent or partial:
 # the original unreachable spec, so an old rules file keeps describing the
 # behaviour it actually described.
-DEFAULT_ENTRY_RULES = {"fill": DEFAULT_ENTRY_FILL, "require_ob_reclaim": False}
+DEFAULT_ENTRY_RULES = {"fill": DEFAULT_ENTRY_FILL, "require_ob_reclaim": False,
+                       "early_retest": DEFAULT_EARLY_RETEST}
 
 
 def entry_rules(rules: dict) -> dict:
@@ -67,7 +70,11 @@ def entry_rules(rules: dict) -> dict:
     spec = {**DEFAULT_ENTRY_RULES, **(rules.get("entry") or {})}
     if spec["fill"] not in ENTRY_FILLS:
         raise ValueError(f"unknown entry fill: {spec['fill']!r}; expected one of {list(ENTRY_FILLS)}")
-    return {"fill": spec["fill"], "require_ob_reclaim": bool(spec["require_ob_reclaim"])}
+    if spec["early_retest"] not in EARLY_RETESTS:
+        raise ValueError(
+            f"unknown early_retest: {spec['early_retest']!r}; expected one of {list(EARLY_RETESTS)}")
+    return {"fill": spec["fill"], "require_ob_reclaim": bool(spec["require_ob_reclaim"]),
+            "early_retest": spec["early_retest"]}
 
 
 DEFAULT_EXIT_RULES = {"fill": DEFAULT_EXIT_FILL, "tp1_resting_limit": False}

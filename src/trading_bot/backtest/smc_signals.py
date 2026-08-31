@@ -31,6 +31,11 @@ precise algorithm -- these choices are documented here, not hidden):
     mirrored for highs. This carries the same ~2-bar confirmation lag.
   - The OB candle is found by walking backward from a structure-break bar
     to the nearest bearish candle, capped at OB_SEARCH_LOOKBACK bars.
+  - An order block is only tradeable from ob_idx + 2 onward, because the
+    FVG that validates it is a three-candle pattern ending on that bar.
+    A retest before then is mitigating but untradeable -- the bot cannot
+    know the block exists yet. (2026-08-31; this was the entire 46%
+    live/backtest signal gap.)
   - Entry fill: see ENTRY_FILLS below. The original spec filled at the
     OB's high the instant a bar's low touched it, which no order type can
     actually achieve (smc_fill_model, 2026-08-28); the reachable specs
@@ -50,6 +55,10 @@ from __future__ import annotations
 BAR_INTERVAL_MINUTES = 5
 
 OB_SEARCH_LOOKBACK = 10
+# How a retest arriving before its own block's FVG completes is handled;
+# see find_smc_long_trades. "skip" is the reachable baseline.
+EARLY_RETESTS = ("skip", "defer")
+DEFAULT_EARLY_RETEST = "skip"
 DEFAULT_TIME_WINDOW_BARS = 33
 DEFAULT_TP1_FRACTION = 0.25
 
@@ -92,7 +101,12 @@ def find_swing_lows(lows: list[float], window: int = DEFAULT_SWING_WINDOW) -> li
 
 def has_fvg(highs: list[float], lows: list[float], start_idx: int) -> bool:
     """Bullish fair value gap starting at `start_idx`: the first candle's
-    high doesn't reach the third candle's low, leaving an unfilled gap."""
+    high doesn't reach the third candle's low, leaving an unfilled gap.
+
+    Note this reads start_idx + 2, so a caller deciding something AT a bar
+    can only ask about blocks two bars old or older -- see the retest scan
+    in find_smc_long_trades, which enforces exactly that.
+    """
     if start_idx + 2 >= len(highs):
         return False
     return highs[start_idx] < lows[start_idx + 2]
@@ -275,6 +289,7 @@ def find_smc_long_trades(
     exit_fill: str = DEFAULT_EXIT_FILL,
     tp1_resting_limit: bool = False,
     entry_allowed: list[bool] | None = None,
+    early_retest: str = DEFAULT_EARLY_RETEST,
 ) -> list[dict]:
     """Scan one symbol's chronological 5-min bars and return every long
     trade this Level 1 SMC strategy would have taken, fully simulated
@@ -324,6 +339,17 @@ def find_smc_long_trades(
             because breakeven is not free: it converts a large share of
             trades into scratches that still occupy one of the portfolio's
             concurrent-position slots.
+        early_retest: what to do when a block is retested before its own
+            FVG completes (retest at ob_idx + 1, FVG knowable only at
+            ob_idx + 2) -- one of EARLY_RETESTS. "skip" (the default) does
+            not trade it: at the retest the bot cannot know the block is
+            valid at all, and scoring the entry anyway is the lookahead
+            that produced this repo's 46% live/backtest signal gap.
+            "defer" waits for that third candle to close and acts from
+            there, which is reachable and recovers those signals at the
+            cost of one to two bars of delay -- a real cost for a strategy
+            that measured negative on next_high (70f3c44). Which is better
+            is an empirical question; both are live-implementable.
         entry_fill: where the entry fills once a retest is detected -- one
             of ENTRY_FILLS. "level" (the default, and the only behavior
             available before this was a parameter) fills at the OB high on
@@ -406,6 +432,8 @@ def find_smc_long_trades(
         and never mutated; anything computing entry-time risk (e.g.
         position sizing) must use `initial_stop_price`, not `stop_price`.
     """
+    if early_retest not in EARLY_RETESTS:
+        raise ValueError(f"unknown early_retest: {early_retest!r}; expected one of {list(EARLY_RETESTS)}")
     if entry_fill not in ENTRY_FILLS:
         raise ValueError(f"unknown entry_fill: {entry_fill!r}; expected one of {list(ENTRY_FILLS)}")
     if exit_fill not in EXIT_FILLS:
@@ -479,7 +507,10 @@ def find_smc_long_trades(
         pending_bull_obs = [ob for ob in pending_bull_obs if ob["expiry_idx"] >= i]
 
         # --- manage an already-open trade ---
-        if open_trade is not None:
+        # Not before its fill bar: under early_retest="defer" the order is
+        # set up on the retest bar but does not fill for another bar or
+        # two, and the bars in between are not the position's to lose.
+        if open_trade is not None and i >= open_trade["entry_idx"]:
             pos = open_trade
             if lows[i] <= pos["stop_price"]:
                 # The stop rests at the broker, so it triggers intrabar and
@@ -581,19 +612,50 @@ def find_smc_long_trades(
                 if ob["ob_idx"] >= i or lows[i] > ob["ob_high"]:
                     continue
 
+                if ob["ob_idx"] + 2 > i and early_retest == "skip":
+                    # The FVG validating this block is a three-candle
+                    # pattern ending at ob_idx + 2, so on a retest this
+                    # soon that third candle has not closed yet. Scoring
+                    # an entry here reads a bar out of the future: the
+                    # bot decides at bar i, and cannot yet know the block
+                    # is valid at all. Measured 2026-08-31 as the whole of
+                    # the 46% live/backtest signal gap -- all 68 missed
+                    # signals were ob_idx + 1 retests, all 57 agreed ones
+                    # were ob_idx + 3 or older.
+                    #
+                    # The retest still MITIGATES, for the same reason
+                    # entry_allowed's does: the live recompute one bar
+                    # later can see the FVG, walks this same retest, and
+                    # consumes the block. Leaving it pending would invent
+                    # a second chance at it that the bot never gets.
+                    pending_bull_obs.remove(ob)
+                    continue
+
+                # Where the bot can ACT on this retest. Normally the retest
+                # bar itself; under early_retest="defer" a block younger
+                # than its own FVG waits for the third candle to close, and
+                # the order goes in from there instead of being abandoned.
+                decide_idx = max(i, ob["ob_idx"] + 2)
+                if decide_idx >= n or not _same_session(dates, i, decide_idx):
+                    # Nothing rests overnight: a retest whose FVG only
+                    # completes in the next session is not actionable, and
+                    # the block is spent either way.
+                    pending_bull_obs.remove(ob)
+                    continue
+
                 if require_ob_reclaim and closes[i] <= ob["ob_high"]:
                     # Retested and rejected: still mitigated, just not traded.
                     pending_bull_obs.remove(ob)
                     continue
 
-                if entry_allowed is not None and not entry_allowed[i]:
+                if entry_allowed is not None and not entry_allowed[decide_idx]:
                     # Outside the bot's entry window. The retest happened
                     # regardless, and the live recompute consumes the block
                     # exactly the same way -- see entry_allowed's docstring.
                     pending_bull_obs.remove(ob)
                     continue
 
-                fill_idx = _entry_fill_bar(dates, i, n, entry_fill, force_close_same_day)
+                fill_idx = _entry_fill_bar(dates, decide_idx, n, entry_fill, force_close_same_day)
                 if fill_idx is None:
                     # No reachable fill bar, and that is a property of the
                     # bar, not of this block -- so it holds for every other
@@ -629,7 +691,8 @@ def find_smc_long_trades(
 
                 open_trade = {
                     "entry_idx": fill_idx, "entry_date": dates[fill_idx], "entry_price": entry_price,
-                    "signal_idx": i, "signal_price": ob["ob_high"],
+                    "signal_idx": decide_idx, "signal_price": ob["ob_high"],
+                    "retest_idx": i,
                     "stop_price": stop_price, "initial_stop_price": stop_price,
                     "ob_idx": ob["ob_idx"], "tp1_price": tp1_price,
                     "tp1_done": False, "remaining_fraction": 1.0, "fills": [],
@@ -664,6 +727,7 @@ def latest_entry_signal(
     swing_window: int = DEFAULT_SWING_WINDOW,
     require_confirmed_trend: bool = False,
     require_ob_reclaim: bool = False,
+    early_retest: str = DEFAULT_EARLY_RETEST,
 ) -> dict | None:
     """If this symbol's SMC entry would trigger on the LAST bar of `bars`,
     return that trade dict (entry_price = OB high, stop_price = OB low,
@@ -698,7 +762,7 @@ def latest_entry_signal(
     for trade in find_smc_long_trades(
         bars, time_window_bars, tp1_fraction, swing_window, require_confirmed_trend,
         force_close_same_day=False, require_ob_reclaim=require_ob_reclaim,
-        entry_fill="level",
+        entry_fill="level", early_retest=early_retest,
     ):
         if trade["entry_idx"] == n - 1:
             return trade

@@ -211,6 +211,8 @@ def main() -> int:
     parser.add_argument("--intraday-dir", type=Path, default=Path("backtest_data/intraday_5m"))
     parser.add_argument("--daily-dir", type=Path, default=DAILY_DIR)
     parser.add_argument("--rules", type=Path, default=Path("smc_rules.json"))
+    parser.add_argument("--early-retest", choices=["skip", "defer"], default=None,
+                        help="override smc_rules.json's entry.early_retest, for A/B runs")
     parser.add_argument("--harness-basis", action="store_true",
                         help="drop the live bot's same-day close, entry window and daily "
                              "watchlist -- the pre-2026-08-29 basis, for reproducing old figures")
@@ -274,6 +276,7 @@ def main() -> int:
             require_ob_reclaim=entry["require_ob_reclaim"],
             exit_fill=exit_["fill"],
             tp1_resting_limit=exit_["tp1_resting_limit"],
+            early_retest=args.early_retest or entry["early_retest"],
             **live_constraints,
         )
         print(f"  {len(candidates_by_slippage[key])} candidates", flush=True)

@@ -79,6 +79,25 @@ def _bars(rows: list[tuple[float, float, float, float]]) -> dict:
 
 
 class TestFindSmcLongTrades(unittest.TestCase):
+    # The hand-traced scenario, shared with TestEarlyRetest (which needs a
+    # block whose retest is late enough to be knowable).
+    LIFECYCLE_ROWS = [
+        (10, 10, 9, 10),    # 0
+        (10, 10, 9, 10),    # 1
+        (12, 12, 11, 12),   # 2 -- swing high (12), confirmed at idx 4
+        (10, 10, 9, 10),    # 3
+        (10, 10, 9, 10),    # 4
+        (11, 11, 8, 9),     # 5 -- bearish OB candle (high=11, low=8)
+        (9, 17, 12, 16),    # 6 -- bullish impulse; closes(16) > swing high(12) -> ChoCh
+        (16, 20, 16, 19),   # 7 -- FVG confirmed: highs[5]=11 < lows[7]=16
+        (19, 19, 10, 13),   # 8 -- pullback touches OB top (11) -> ENTRY @ 11
+        (13, 16, 13, 15),   # 9
+        (15, 19, 15, 18),   # 10
+        (18, 25, 17, 17),   # 11 -- new swing high (25), confirmed at idx 13
+        (17, 20, 15, 16),   # 12
+        (16, 18, 13, 14),   # 13 -- exit fires here (confirmation lag)
+    ]
+
     def test_too_few_bars_returns_no_trades(self):
         bars = _bars([(10, 10, 9, 10)] * 5)
         self.assertEqual(smc.find_smc_long_trades(bars), [])
@@ -94,23 +113,7 @@ class TestFindSmcLongTrades(unittest.TestCase):
         None. A later swing high confirms at idx 11 (25), so the position
         fully exits there at its close (17) once confirmed at idx 13.
         """
-        rows = [
-            (10, 10, 9, 10),    # 0
-            (10, 10, 9, 10),    # 1
-            (12, 12, 11, 12),   # 2 -- swing high (12), confirmed at idx 4
-            (10, 10, 9, 10),    # 3
-            (10, 10, 9, 10),    # 4
-            (11, 11, 8, 9),     # 5 -- bearish OB candle (high=11, low=8)
-            (9, 17, 12, 16),    # 6 -- bullish impulse; closes(16) > swing high(12) -> ChoCh
-            (16, 20, 16, 19),   # 7 -- FVG confirmed: highs[5]=11 < lows[7]=16
-            (19, 19, 10, 13),   # 8 -- pullback touches OB top (11) -> ENTRY @ 11
-            (13, 16, 13, 15),   # 9
-            (15, 19, 15, 18),   # 10
-            (18, 25, 17, 17),   # 11 -- new swing high (25), confirmed at idx 13
-            (17, 20, 15, 16),   # 12
-            (16, 18, 13, 14),   # 13 -- exit fires here (confirmation lag)
-        ]
-        bars = _bars(rows)
+        bars = _bars(self.LIFECYCLE_ROWS)
 
         trades = smc.find_smc_long_trades(bars, entry_fill="level", exit_fill="level")
 
@@ -297,6 +300,128 @@ class TestConfirmedNewHighExit(unittest.TestCase):
         # post-entry data truncated so idx 11's high isn't confirmed, the
         # pre-entry pivot alone must not fire the exit.
         self.assertFalse(smc.confirmed_new_high_exit(self.HIGHS[:12], entry_idx=8, swing_window=2))
+
+
+class TestEarlyRetest(unittest.TestCase):
+    """A block retested before its own FVG completes.
+
+    The FVG validating the OB at idx 9 is highs[9] < lows[11], so nothing
+    can know the block is valid until bar 11 closes. Here the retest
+    arrives at bar 10 -- one bar too early. Scoring an entry there reads
+    bar 11 out of the future, and that lookahead was the whole of the 46%
+    live/backtest signal gap measured on 2026-08-31.
+
+    The leading filler bars are not decoration: the live adapter is
+    replayed one bar at a time below, and find_smc_long_trades declines
+    anything shorter than 10 bars.
+    """
+
+    ROWS = [
+        (10, 10, 9, 10),    # 0
+        (10, 10, 9, 10),    # 1
+        (10, 10, 9, 10),    # 2
+        (10, 10, 9, 10),    # 3
+        (10, 10, 9, 10),    # 4
+        (10, 10, 9, 10),    # 5
+        (12, 12, 11, 12),   # 6 -- swing high (12), confirmed at idx 8
+        (10, 10, 9, 10),    # 7
+        (10, 10, 9, 10),    # 8
+        (11, 11, 8, 9),     # 9 -- bearish OB candle (high=11, low=8)
+        (9, 17, 10, 16),    # 10 -- ChoCh (16 > 12) AND low 10 retests the
+                            #       OB high 11, a bar before the FVG closes
+        (16, 20, 16, 19),   # 11 -- FVG completes: highs[9]=11 < lows[11]=16
+        (19, 19, 15, 18),   # 12 -- a deferred order fills at this open (19)
+        (18, 22, 17, 21),   # 13
+        (21, 25, 20, 24),   # 14
+        (24, 26, 23, 25),   # 15
+        (25, 25, 20, 21),   # 16
+        (21, 22, 18, 19),   # 17
+    ]
+
+    def test_the_default_does_not_trade_it(self):
+        trades = smc.find_smc_long_trades(_bars(self.ROWS), entry_fill="level")
+        self.assertEqual([t for t in trades if t["ob_idx"] == 9], [])
+
+    def test_the_retest_still_mitigates_the_block(self):
+        """It is spent, not postponed: the live recompute one bar later
+        walks this same retest and consumes it. Bar 13 dips back through
+        the OB high -- if the block were left pending it would fire there,
+        inventing a second chance the bot never gets."""
+        rows = self.ROWS[:13] + [(18, 19, 10, 18)] + self.ROWS[14:]
+        trades = smc.find_smc_long_trades(_bars(rows), entry_fill="level")
+        self.assertEqual([t for t in trades if t["ob_idx"] == 9], [])
+
+    def test_defer_waits_for_the_fvg_and_then_trades(self):
+        trades = smc.find_smc_long_trades(
+            _bars(self.ROWS), entry_fill="next_open", early_retest="defer")
+        mine = [t for t in trades if t["ob_idx"] == 9]
+        self.assertEqual(len(mine), 1)
+        trade = mine[0]
+        self.assertEqual(trade["retest_idx"], 10)
+        # Acts at the close of bar 11, the first bar at which the FVG is
+        # knowable -- not at bar 10, where it is not.
+        self.assertEqual(trade["signal_idx"], 11)
+        self.assertEqual(trade["entry_idx"], 12)
+        self.assertEqual(trade["entry_price"], 19)
+        self.assertEqual(trade["stop_price"], 8)
+
+    def test_no_leg_fills_before_the_entry_does(self):
+        """The order is set up on the retest bar but is not live until its
+        fill bar. Managing the position in between would book exits on a
+        position nobody held."""
+        trades = smc.find_smc_long_trades(
+            _bars(self.ROWS), entry_fill="next_open", early_retest="defer")
+        for t in trades:
+            self.assertGreaterEqual(min(f["idx"] for f in t["fills"]), t["entry_idx"])
+
+    def test_a_block_old_enough_is_unaffected(self):
+        """The gate is about the FVG's third candle, not about retests in
+        general -- the hand-traced fixture retests at ob_idx + 3."""
+        trades = smc.find_smc_long_trades(
+            _bars(TestFindSmcLongTrades.LIFECYCLE_ROWS), entry_fill="level", exit_fill="level")
+        self.assertEqual(len(trades), 1)
+        self.assertEqual(trades[0]["signal_idx"], 8)
+
+    def test_unknown_mode_is_rejected(self):
+        with self.assertRaises(ValueError):
+            smc.find_smc_long_trades(_bars(self.ROWS), early_retest="immediately")
+
+
+class TestLiveBacktestSignalParity(unittest.TestCase):
+    """The live adapter and the backtest must see the same signals.
+
+    Nothing pinned this, and for months they did not: the backtest scored
+    entries whose FVG only completed after the bar the bot had to act on,
+    which the live path -- whose data ends at that bar -- could never
+    reproduce. Walking latest_entry_signal bar by bar and demanding the
+    same set is the unit-test form of cli/smc_signal_parity.
+    """
+
+    def _live(self, rows, **kw):
+        """Every bar latest_entry_signal fires on, replayed the way
+        smc_cycle drives it: one call per closed bar, data ending there."""
+        return {i for i in range(len(rows))
+                if smc.latest_entry_signal(_bars(rows[:i + 1]), **kw) is not None}
+
+    def _backtest(self, rows, **kw):
+        return {t["signal_idx"] for t in smc.find_smc_long_trades(
+            _bars(rows), entry_fill="level", **kw)}
+
+    def test_they_agree_on_the_early_retest_fixture(self):
+        rows = TestEarlyRetest.ROWS
+        self.assertEqual(self._live(rows), self._backtest(rows))
+
+    def test_they_agree_when_deferring(self):
+        rows = TestEarlyRetest.ROWS
+        self.assertEqual(self._live(rows, early_retest="defer"),
+                         self._backtest(rows, early_retest="defer"))
+
+    def test_deferring_is_what_recovers_the_signal(self):
+        """Both modes agree, but only one trades this setup -- so the two
+        tests above cannot be passing by finding nothing at all."""
+        rows = TestEarlyRetest.ROWS
+        self.assertNotIn(11, self._live(rows))
+        self.assertIn(11, self._live(rows, early_retest="defer"))
 
 
 class TestSlippage(unittest.TestCase):

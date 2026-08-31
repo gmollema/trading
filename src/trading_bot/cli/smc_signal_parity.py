@@ -59,7 +59,8 @@ ACTION_DELAY_MINUTES = 7
 
 
 def live_signals_for(frame: pd.DataFrame, sessions: set, rules: dict, reclaim: bool,
-                     window_days: int = LIVE_WINDOW_DAYS) -> set:
+                     window_days: int = LIVE_WINDOW_DAYS,
+                     early_retest: str = "skip") -> set:
     """Every (bar timestamp) the live path would report a signal on.
 
     Deliberately re-runs the whole pass per bar rather than once: that is
@@ -83,7 +84,8 @@ def live_signals_for(frame: pd.DataFrame, sessions: set, rules: dict, reclaim: b
             "date": win["date"].tolist(),
         }
         if latest_entry_signal(bars, rules["time_window_bars"], rules["tp1_fraction"],
-                               rules["swing_window"], False, reclaim) is not None:
+                               rules["swing_window"], False, reclaim,
+                               early_retest) is not None:
             out.add(frame["date"].iloc[i])
     return out
 
@@ -136,6 +138,7 @@ def main() -> int:
         slippage_bps=leg_slippage(entry["fill"], exit_["fill"], exit_["tp1_resting_limit"]),
         entry_fill=entry["fill"], require_ob_reclaim=entry["require_ob_reclaim"],
         exit_fill=exit_["fill"], tp1_resting_limit=exit_["tp1_resting_limit"],
+        early_retest=entry["early_retest"],
         force_close_same_day=True,
         entry_window_et=(tf["earliest_entry_et"], tf["latest_entry_et"]),
         daily_watchlist=watchlist,
@@ -159,7 +162,8 @@ def main() -> int:
             continue
         # Only replay days this ticker was actually on the watchlist for.
         mine = {d for d in sessions if t in watchlist[d]}
-        for ts in live_signals_for(frame, mine, rules, entry["require_ob_reclaim"], args.window_days):
+        for ts in live_signals_for(frame, mine, rules, entry["require_ob_reclaim"],
+                                   args.window_days, entry["early_retest"]):
             live.add((t, ts))
         if n % 10 == 0:
             print(f"  replayed {n}/{len(tickers)} tickers, {len(live)} live signals so far", flush=True)

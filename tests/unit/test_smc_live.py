@@ -168,18 +168,24 @@ class TestEntryRules(unittest.TestCase):
         should never hand back a basis nothing can execute."""
         self.assertEqual(
             smc_live.entry_rules({}),
-            {"fill": "next_open", "require_ob_reclaim": False},
+            {"fill": "next_open", "require_ob_reclaim": False, "early_retest": "skip"},
         )
 
     def test_partial_block_is_filled_in(self):
         self.assertEqual(
             smc_live.entry_rules({"entry": {"fill": "next_open"}}),
-            {"fill": "next_open", "require_ob_reclaim": False},
+            {"fill": "next_open", "require_ob_reclaim": False, "early_retest": "skip"},
         )
 
     def test_values_are_read_through(self):
-        spec = smc_live.entry_rules({"entry": {"fill": "next_high", "require_ob_reclaim": True}})
-        self.assertEqual(spec, {"fill": "next_high", "require_ob_reclaim": True})
+        spec = smc_live.entry_rules({"entry": {"fill": "next_high", "require_ob_reclaim": True,
+                                               "early_retest": "defer"}})
+        self.assertEqual(spec, {"fill": "next_high", "require_ob_reclaim": True,
+                                "early_retest": "defer"})
+
+    def test_unknown_early_retest_is_rejected(self):
+        with self.assertRaises(ValueError):
+            smc_live.entry_rules({"entry": {"early_retest": "immediately"}})
 
     def test_unknown_fill_is_rejected(self):
         """Only the backtests consume `fill`, so a typo would otherwise go
