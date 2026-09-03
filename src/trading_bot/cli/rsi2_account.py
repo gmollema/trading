@@ -142,6 +142,7 @@ def run_account(trades: list[dict], bars: dict, capital: float, spec, args: argp
 
     years = (bars["date"][-1] - bars["date"][lo]).days / 365.25
     return {
+        "equity_curve": curve,
         "final_equity": round(equity),
         "total_return_pct": round((equity / capital - 1) * 100, 1),
         "cagr_pct": round(cagr_pct(capital, equity, years), 2),
@@ -176,8 +177,8 @@ def main(argv=None) -> int:
     rows = []
     for capital in [float(x) for x in args.capitals.split(",") if x.strip()]:
         s = run_account(trades, bars, capital, spec, args)
-        rows.append({"capital": capital, **s})
-        print(f"${capital:>10,.0f}  {json.dumps(s)}")
+        rows.append({"capital": capital, **{k: v for k, v in s.items() if k != "equity_curve"}})
+        print(f"${capital:>10,.0f}  {json.dumps({k: v for k, v in s.items() if k != 'equity_curve'})}")
 
     if args.out_csv:
         import csv
