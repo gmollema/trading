@@ -38,6 +38,18 @@ from pathlib import Path
 
 import pandas as pd
 
+from dataclasses import replace
+
+from trading_bot.backtest.rsi2_engine import (
+    CONTRACTS,
+    DEFAULT_MAX_MARGIN_PCT,
+    DEFAULT_RISK_PCT,
+    DEFAULT_SLIPPAGE_TICKS,
+    ContractSpec,
+    cagr_pct,
+    max_drawdown_pct,
+    run_rsi2_futures_backtest,
+)
 from trading_bot.backtest.rsi2_signals import (
     DEFAULT_ENTRY_LEVEL,
     DEFAULT_EXIT_LEVEL,
@@ -75,8 +87,67 @@ def parse_args(argv=None) -> argparse.Namespace:
     parser.add_argument("--cost-points", type=float, default=0.0,
                         help="points deducted per round trip for spread/commission (0 = the video's assumption)")
     parser.add_argument("--sweep-delay", action="store_true", help="reproduce the video's 1..20 day-delay optimization")
+    parser.add_argument("--dollars", action="store_true",
+                        help="also size in whole futures contracts and report dollar P&L (see backtest/rsi2_engine.py)")
+    parser.add_argument("--contract", type=str, default="MES", choices=sorted(CONTRACTS))
+    parser.add_argument("--initial-capital", type=float, default=100_000.0)
+    parser.add_argument("--risk-pct", type=float, default=DEFAULT_RISK_PCT)
+    parser.add_argument("--max-margin-pct", type=float, default=DEFAULT_MAX_MARGIN_PCT)
+    parser.add_argument("--slippage-ticks", type=float, default=DEFAULT_SLIPPAGE_TICKS)
+    parser.add_argument("--margin-per-contract", type=float, default=None,
+                        help="override the contract's assumed margin (it moves with volatility; see rsi2_engine)")
     parser.add_argument("--out-csv", type=str, default=None)
     return parser.parse_args(argv)
+
+
+def resolve_spec(args: argparse.Namespace) -> ContractSpec:
+    spec = CONTRACTS[args.contract]
+    if args.margin_per_contract is not None:
+        spec = replace(spec, margin_per_contract=args.margin_per_contract)
+    return spec
+
+
+def dollar_summary(point_trades: list[dict], bars: dict, window: tuple[str | None, str | None],
+                   args: argparse.Namespace, spec: ContractSpec) -> dict:
+    """Contract-sized dollar result for one variant over one window.
+
+    The index return is the benchmark rather than a dollar buy-and-hold
+    figure: comparing dollars would require inventing a leverage choice
+    for the benchmark, and any such choice would decide the comparison
+    by itself.
+    """
+    result = run_rsi2_futures_backtest(
+        point_trades, bars, args.initial_capital, spec,
+        risk_pct=args.risk_pct, max_margin_pct=args.max_margin_pct,
+        slippage_ticks=args.slippage_ticks,
+    )
+    taken = result["trades"]
+    final = result["final_equity"]
+
+    start, end = window
+    idx = [i for i, ts in enumerate(bars["date"]) if in_window(ts, start, end)]
+    if idx:
+        span_years = (bars["date"][idx[-1]] - bars["date"][idx[0]]).days / 365.25
+        index_return = (bars["close"][idx[-1]] / bars["open"][idx[0]] - 1) * 100
+    else:
+        span_years, index_return = 0.0, 0.0
+
+    costs = sum(t["commission"] + t["slippage"] for t in taken)
+    return {
+        "trades_taken": len(taken),
+        "trades_skipped": result["skipped_trades"],
+        "net_pnl": round(final - args.initial_capital, 0),
+        "return_pct": round((final / args.initial_capital - 1) * 100, 1),
+        "cagr_pct": round(cagr_pct(args.initial_capital, final, span_years), 1),
+        "max_dd_pct": round(max_drawdown_pct(result["equity_curve"]), 1),
+        "avg_contracts": round(sum(t["contracts"] for t in taken) / len(taken), 1) if taken else 0.0,
+        "max_contracts": max((t["contracts"] for t in taken), default=0),
+        "costs_paid": round(costs, 0),
+        "costs_pct_of_gross": round(costs / sum(t["gross_pnl"] for t in taken) * 100, 1)
+        if taken and sum(t["gross_pnl"] for t in taken) > 0 else 0.0,
+        "index_return_pct": round(index_return, 1),
+        "locked_out_from": str(result["locked_out_from"].date()) if result["locked_out_from"] is not None else None,
+    }
 
 
 def load_bars(symbol: str, data_dir: Path) -> dict:
@@ -240,6 +311,13 @@ def variants(args: argparse.Namespace) -> list[tuple[str, str, int, str]]:
     ]
 
 
+def _write_rows(rows: list[dict], path: Path) -> None:
+    with path.open("w", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=list(rows[0].keys()))
+        writer.writeheader()
+        writer.writerows(rows)
+
+
 def main(argv=None) -> int:
     args = parse_args(argv)
     bars = load_bars(args.symbol, Path(args.data_dir))
@@ -249,14 +327,38 @@ def main(argv=None) -> int:
     print(f"stop: {stop_desc}   cost per round trip: {args.cost_points} pts\n")
 
     rows: list[dict] = []
+    by_variant: dict[str, list[dict]] = {}
     for label, exit_mode, min_hold, timing in variants(args):
         all_trades = run_variant(bars, args, exit_mode, min_hold, timing)
+        by_variant[label] = all_trades
         for window_name, window in WINDOWS.items():
             windowed = [t for t in all_trades if in_window(t["entry_date"], *window)]
             summary = {"variant": label, "window": window_name, **summarize(windowed, bars, window)}
             rows.append(summary)
             print(f"{label:32s} {window_name:11s} {json.dumps({k: v for k, v in summary.items() if k not in ('variant', 'window')})}")
         print()
+
+    dollar_rows: list[dict] = []
+    if args.dollars:
+        spec = resolve_spec(args)
+        risk_per_contract = (args.stop_points * spec.multiplier) if not (args.no_stop or args.stop_pct is not None) else None
+        print(f"{spec.name}: ${spec.multiplier:g}/point, ${spec.commission_per_side}/side, "
+              f"${spec.margin_per_contract:g} margin (assumed)   capital ${args.initial_capital:,.0f}, "
+              f"risk {args.risk_pct}%, slippage {args.slippage_ticks} tick/side")
+        if risk_per_contract:
+            floor = risk_per_contract / (args.risk_pct / 100.0)
+            print(f"  a {args.stop_points:g}-point stop risks ${risk_per_contract:,.0f} per contract, so "
+                  f"{args.risk_pct}% risk needs ~${floor:,.0f} of equity for the FIRST contract")
+        print()
+        for label, all_trades in by_variant.items():
+            for window_name, window in WINDOWS.items():
+                windowed = [t for t in all_trades if in_window(t["entry_date"], *window)]
+                summary = {"variant": label, "window": window_name,
+                           **dollar_summary(windowed, bars, window, args, spec)}
+                dollar_rows.append(summary)
+                print(f"{label:32s} {window_name:11s} "
+                      f"{json.dumps({k: v for k, v in summary.items() if k not in ('variant', 'window')})}")
+            print()
 
     if args.sweep_delay:
         print("day-delay sweep (the video's optimization, run on each window separately)")
@@ -272,11 +374,15 @@ def main(argv=None) -> int:
 
     if args.out_csv:
         path = Path(args.out_csv)
-        with path.open("w", newline="") as f:
-            writer = csv.DictWriter(f, fieldnames=list(rows[0].keys()))
-            writer.writeheader()
-            writer.writerows(rows)
+        _write_rows(rows, path)
         print(f"\nwrote {len(rows)} rows to {path}")
+        if dollar_rows:
+            # Separate file, not merged: the dollar and point summaries
+            # have disjoint columns and jamming them into one table would
+            # leave half of every row empty.
+            dollar_path = path.with_name(f"{path.stem}_dollars{path.suffix}")
+            _write_rows(dollar_rows, dollar_path)
+            print(f"wrote {len(dollar_rows)} rows to {dollar_path}")
 
     return 0
 
