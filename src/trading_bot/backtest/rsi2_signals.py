@@ -318,3 +318,161 @@ def find_rsi2_long_trades(
         _close_trade(n - 1, closes[n - 1], "end_of_data")
 
     return trades
+
+
+DEFAULT_MAX_POSITIONS = 3
+
+
+def find_rsi2_scale_in_trades(
+    bars: dict,
+    rsi_period: int = DEFAULT_RSI_PERIOD,
+    entry_level: float = DEFAULT_ENTRY_LEVEL,
+    exit_level: float = DEFAULT_EXIT_LEVEL,
+    sma_period: int = DEFAULT_SMA_PERIOD,
+    max_positions: int = DEFAULT_MAX_POSITIONS,
+    stop_pct: float | None = None,
+    exit_timing: str = "close",
+    entry_timing: str = "close",
+) -> list[dict]:
+    """The scale-into-weakness variant from the YouTube video "2 Period RSI
+    Trick for Mean Reversion Trading" (b4eCe9SdVBY, ~2023).
+
+    Same entry and exit signals as `find_rsi2_long_trades` in
+    EXIT_MODE_RSI mode, with one change: while a position is already open,
+    a FRESH crossing down through `entry_level` adds another contract,
+    up to `max_positions`. The whole stack then exits together when RSI
+    closes above `exit_level`.
+
+    Rules with their timestamps in the transcript:
+      Instrument      E-mini S&P 500 continuous (@ES), daily. Jan 2005 -
+                      Aug 2023 in the video's own test.
+      Trend filter    Close above the 200-period MA, simple or exponential
+                      ("it doesn't really matter which").
+      First entry     RSI(2) crosses below 10, buy 1 contract on the close
+                      -- the video allows "just before the close of the
+                      market or on the open of the next bar" as equivalent,
+                      hence `entry_timing`.
+      Adds            "we don't get in the next position until it crosses
+                      back below 10" -- so RSI must return above the level
+                      and cross down again. Note this needs no extra state
+                      here: a strict crossing already requires the PRIOR
+                      bar to sit at or above the level, so every fresh
+                      signal is by definition a re-crossing. The trend
+                      filter applies to adds too ("exactly the same as
+                      rule number two").
+      Exit            RSI(2) crosses above 70, sell the entire stack.
+      No stop         The video uses none, which is why it reports two
+                      drawdown columns -- closed-trade and open-equity.
+                      `stop_pct` is offered anyway and applies PER
+                      POSITION, each closing on its own stop, since each
+                      was entered at a different price.
+
+    The video reports 1, 2 and 3+ positions and finds 3 through 6
+    identical, concluding the market rarely dips below the level more than
+    three times before an exit fires. `max_positions` is what that claim
+    is tested against.
+
+    Returns:
+        one dict per CONTRACT (not per campaign), carrying
+        {"campaign","position_num","entry_idx","entry_date","entry_price",
+        "stop_price","exit_idx","exit_date","exit_price","bars_held",
+        "points","mae_points","reason"}. Positions in one campaign share
+        an exit unless a per-position stop closed one early. `campaign`
+        numbers from 0 so consumers can group a stack back together.
+    """
+    if exit_timing not in ("close", "next_open"):
+        raise ValueError(f"unknown exit_timing {exit_timing!r}")
+    if entry_timing not in ("close", "next_open"):
+        raise ValueError(f"unknown entry_timing {entry_timing!r}")
+    if max_positions < 1:
+        raise ValueError("max_positions must be at least 1")
+
+    dates, opens = bars["date"], bars["open"]
+    lows, closes = bars["low"], bars["close"]
+    n = len(closes)
+    if n == 0:
+        return []
+
+    rsi = wilder_rsi(closes, rsi_period)
+    signals = rsi2_entry_signals(closes, rsi_period, entry_level, sma_period)
+
+    out: list[dict] = []
+    open_pos: list[dict] = []
+    campaign = 0
+    pending_entry = False
+    pending_exit = False
+
+    def _close(pos: dict, i: int, price: float, reason: str, at_open: bool = False) -> None:
+        entry_idx = pos["entry_idx"]
+        last = i - 1 if (at_open and i > entry_idx) else i
+        out.append({
+            **pos,
+            "exit_idx": i,
+            "exit_date": dates[i],
+            "exit_price": price,
+            "bars_held": i - entry_idx + 1,
+            "points": price - pos["entry_price"],
+            "mae_points": max(0.0, pos["entry_price"] - min(lows[entry_idx : last + 1])),
+            "reason": reason,
+        })
+
+    for i in range(n):
+        # 1. A stack exit signalled on the previous close fills at this open.
+        if open_pos and pending_exit:
+            for pos in open_pos:
+                _close(pos, i, opens[i], "rsi_exit", at_open=True)
+            open_pos = []
+            pending_exit = False
+            campaign += 1
+
+        # 2. An entry signalled on the previous close fills at this open.
+        if pending_entry and len(open_pos) < max_positions:
+            open_pos.append(_new_pos(campaign, len(open_pos) + 1, i, opens[i], dates[i], stop_pct))
+        pending_entry = False
+
+        # 3. Per-position stops fill intrabar, ahead of any close rule.
+        if open_pos:
+            survivors = []
+            for pos in open_pos:
+                if pos["stop_price"] is not None and lows[i] <= pos["stop_price"]:
+                    _close(pos, i, min(opens[i], pos["stop_price"]), "stop_loss")
+                else:
+                    survivors.append(pos)
+            if len(survivors) != len(open_pos):
+                open_pos = survivors
+                if not open_pos:
+                    campaign += 1
+
+        # 4. Exit the whole stack on an overbought close.
+        if open_pos and rsi[i] is not None and rsi[i] > exit_level:
+            if exit_timing == "close":
+                for pos in open_pos:
+                    _close(pos, i, closes[i], "rsi_exit")
+                open_pos = []
+                campaign += 1
+            else:
+                pending_exit = True
+            continue
+
+        # 5. A fresh crossing either opens the stack or adds to it.
+        if signals[i] and len(open_pos) < max_positions:
+            if entry_timing == "close":
+                open_pos.append(_new_pos(campaign, len(open_pos) + 1, i, closes[i], dates[i], stop_pct))
+            else:
+                pending_entry = True
+
+    for pos in open_pos:
+        _close(pos, n - 1, closes[n - 1], "end_of_data")
+
+    return out
+
+
+def _new_pos(campaign: int, num: int, i: int, price: float, date, stop_pct: float | None) -> dict:
+    return {
+        "campaign": campaign,
+        "position_num": num,
+        "entry_idx": i,
+        "entry_date": date,
+        "entry_price": price,
+        "stop_price": price * (1 - stop_pct / 100.0) if stop_pct is not None else None,
+    }
