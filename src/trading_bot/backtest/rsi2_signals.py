@@ -323,6 +323,41 @@ def find_rsi2_long_trades(
 DEFAULT_MAX_POSITIONS = 3
 
 
+def rsi2_dip_sequence(
+    closes: list[float],
+    rsi_period: int = DEFAULT_RSI_PERIOD,
+    entry_level: float = DEFAULT_ENTRY_LEVEL,
+    exit_level: float = DEFAULT_EXIT_LEVEL,
+    sma_period: int = DEFAULT_SMA_PERIOD,
+) -> list[int]:
+    """Per bar: 0 where there is no qualifying entry signal, otherwise the
+    1-based dip number within the current oversold sequence.
+
+    A sequence is a run of dips uninterrupted by an overbought close: the
+    counter increments on every qualifying signal (trend filter included)
+    and resets whenever RSI closes back above `exit_level`, which is the
+    same event that ends a campaign. Position state does not enter into
+    it -- dips are counted whether or not anything was bought.
+
+    Extracted so the single-symbol walk and the portfolio simulation
+    cannot drift apart on the definition of "the second dip"; both call
+    this. A divergence there would be invisible and would move every
+    number the portfolio reports.
+    """
+    rsi = wilder_rsi(closes, rsi_period)
+    signals = rsi2_entry_signals(closes, rsi_period, entry_level, sma_period)
+    out = [0] * len(closes)
+    dip = 0
+    for i in range(len(closes)):
+        if rsi[i] is not None and rsi[i] > exit_level:
+            dip = 0
+            continue
+        if signals[i]:
+            dip += 1
+            out[i] = dip
+    return out
+
+
 def find_rsi2_scale_in_trades(
     bars: dict,
     rsi_period: int = DEFAULT_RSI_PERIOD,
