@@ -129,6 +129,34 @@ class TestReportedFields(unittest.TestCase):
         r = acct.run_account(trades, bars, 100_000.0, ES, make_args(no_yield=True))
         self.assertGreaterEqual(r["max_dd_pct"], 0.0)
 
+class TestSameBarTrade(unittest.TestCase):
+    """A trade can open at a bar's OPEN and close at that same bar's CLOSE
+    (entry_timing="next_open" with exit_timing="close"). Processing exits
+    before entries left such a trade open forever, blocking every later
+    trade -- it reported 1.98% CAGR on unchanged net points."""
+
+    @staticmethod
+    def bars_and_trades():
+        import pandas as pd
+        dates = list(pd.date_range("2005-01-03", periods=8, freq="B", tz="UTC"))
+        closes = [100.0] * 8
+        bars = {"date": dates, "open": list(closes), "high": closes, "low": closes, "close": closes}
+        return bars, [
+            {"entry_idx": 1, "exit_idx": 1, "entry_price": 100.0, "points": 4.0},
+            {"entry_idx": 3, "exit_idx": 5, "entry_price": 100.0, "points": 6.0},
+        ]
+
+    def test_same_bar_trade_closes_and_does_not_block_later_trades(self):
+        bars, trades = self.bars_and_trades()
+        r = acct.run_account(trades, bars, 100_000.0, ES, make_args(no_yield=True))
+        expected = 100_000 + (4.0 + 6.0) * ES.multiplier - 2 * 2 * ES.commission_per_side
+        self.assertAlmostEqual(r["final_equity"], expected, delta=1)
+
+    def test_the_later_trade_is_not_swallowed(self):
+        bars, trades = self.bars_and_trades()
+        both = acct.run_account(trades, bars, 100_000.0, ES, make_args(no_yield=True))
+        first_only = acct.run_account(trades[:1], bars, 100_000.0, ES, make_args(no_yield=True))
+        self.assertGreater(both["final_equity"], first_only["final_equity"])
 
 if __name__ == "__main__":
     unittest.main()

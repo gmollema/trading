@@ -96,9 +96,6 @@ def run_account(trades: list[dict], bars: dict, capital: float, spec, args: argp
     """
     cost = 2 * spec.commission_per_side + 2 * args.slippage_ticks * spec.tick_size * spec.multiplier
     entry_at = {t["entry_idx"]: t for t in trades}
-    exit_at: dict[int, list[dict]] = {}
-    for t in trades:
-        exit_at.setdefault(t["exit_idx"], []).append(t)
 
     equity = capital
     open_trade = None
@@ -117,10 +114,21 @@ def run_account(trades: list[dict], bars: dict, capital: float, spec, args: argp
         equity += interest
         interest_total += interest
 
-        for t in exit_at.get(i, []):
-            if open_trade is t:
-                equity += t["points"] * spec.multiplier * open_contracts - cost * open_contracts
+        # Exit the currently-open trade if it ends on this bar, THEN look
+        # for a new entry, THEN check whether that new entry also ends on
+        # this bar. A trade can legitimately open at a bar's OPEN and
+        # close at that same bar's CLOSE (entry_timing="next_open" with
+        # exit_timing="close" produces exactly this). Handling exits in one
+        # pass before entries leaves such a trade open forever, silently
+        # blocking every later trade -- it reported 1.98% CAGR and a 41.5%
+        # drawdown on unchanged net points before this was fixed.
+        def _close_if_due() -> None:
+            nonlocal equity, open_trade, open_contracts
+            if open_trade is not None and open_trade["exit_idx"] == i:
+                equity += open_trade["points"] * spec.multiplier * open_contracts - cost * open_contracts
                 open_trade, open_contracts = None, 0
+
+        _close_if_due()
 
         if i in entry_at and open_trade is None:
             t = entry_at[i]
@@ -130,6 +138,7 @@ def run_account(trades: list[dict], bars: dict, capital: float, spec, args: argp
                 n = args.contracts
             if n >= 1:
                 open_trade, open_contracts = t, n
+                _close_if_due()
 
         mark = 0.0
         if open_trade is not None:
