@@ -330,6 +330,7 @@ def find_rsi2_scale_in_trades(
     exit_level: float = DEFAULT_EXIT_LEVEL,
     sma_period: int = DEFAULT_SMA_PERIOD,
     max_positions: int = DEFAULT_MAX_POSITIONS,
+    first_dip: int = 1,
     stop_pct: float | None = None,
     exit_timing: str = "close",
     entry_timing: str = "close",
@@ -372,6 +373,21 @@ def find_rsi2_scale_in_trades(
     three times before an exit fires. `max_positions` is what that claim
     is tested against.
 
+    `first_dip` is the video's closing question, left untested there:
+    "what about if we only took that third position ... I'd expect far
+    less trades but I would expect those trades to be a far better
+    quality". Entries are skipped until the dip counter reaches
+    `first_dip`, so (first_dip=1, max_positions=3) is the video's own
+    strategy and (first_dip=3, max_positions=1) is only-the-third-dip.
+    Together the two parameters separate the two things scaling in
+    confounds -- buying DEEPER weakness, and buying MORE of it.
+
+    The dip counter counts qualifying signals (trend filter included) and
+    resets whenever RSI closes back above `exit_level`, which is the same
+    event that ends a campaign. Reaching a fresh oversold sequence
+    therefore starts counting from one again, whether or not anything was
+    bought in the previous one.
+
     Returns:
         one dict per CONTRACT (not per campaign), carrying
         {"campaign","position_num","entry_idx","entry_date","entry_price",
@@ -386,6 +402,8 @@ def find_rsi2_scale_in_trades(
         raise ValueError(f"unknown entry_timing {entry_timing!r}")
     if max_positions < 1:
         raise ValueError("max_positions must be at least 1")
+    if first_dip < 1:
+        raise ValueError("first_dip must be at least 1")
 
     dates, opens = bars["date"], bars["open"]
     lows, closes = bars["low"], bars["close"]
@@ -401,6 +419,7 @@ def find_rsi2_scale_in_trades(
     campaign = 0
     pending_entry = False
     pending_exit = False
+    dip_count = 0
 
     def _close(pos: dict, i: int, price: float, reason: str, at_open: bool = False) -> None:
         entry_idx = pos["entry_idx"]
@@ -443,23 +462,30 @@ def find_rsi2_scale_in_trades(
                 if not open_pos:
                     campaign += 1
 
-        # 4. Exit the whole stack on an overbought close.
-        if open_pos and rsi[i] is not None and rsi[i] > exit_level:
-            if exit_timing == "close":
-                for pos in open_pos:
-                    _close(pos, i, closes[i], "rsi_exit")
-                open_pos = []
-                campaign += 1
-            else:
-                pending_exit = True
-            continue
+        # 4. An overbought close ends the oversold sequence: it exits any
+        # stack and resets the dip counter either way, since the counter
+        # tracks dips WITHIN one sequence whether or not we bought them.
+        if rsi[i] is not None and rsi[i] > exit_level:
+            dip_count = 0
+            if open_pos:
+                if exit_timing == "close":
+                    for pos in open_pos:
+                        _close(pos, i, closes[i], "rsi_exit")
+                    open_pos = []
+                    campaign += 1
+                else:
+                    pending_exit = True
+                continue
 
-        # 5. A fresh crossing either opens the stack or adds to it.
-        if signals[i] and len(open_pos) < max_positions:
-            if entry_timing == "close":
-                open_pos.append(_new_pos(campaign, len(open_pos) + 1, i, closes[i], dates[i], stop_pct))
-            else:
-                pending_entry = True
+        # 5. A fresh crossing counts as a dip, and buys one once the
+        # counter has reached `first_dip`.
+        if signals[i]:
+            dip_count += 1
+            if dip_count >= first_dip and len(open_pos) < max_positions:
+                if entry_timing == "close":
+                    open_pos.append(_new_pos(campaign, len(open_pos) + 1, i, closes[i], dates[i], stop_pct))
+                else:
+                    pending_entry = True
 
     for pos in open_pos:
         _close(pos, n - 1, closes[n - 1], "end_of_data")

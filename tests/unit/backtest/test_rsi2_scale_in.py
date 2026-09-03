@@ -139,12 +139,66 @@ class TestScaleIn(unittest.TestCase):
         self.assertGreater(out[0]["mae_points"], out[2]["mae_points"])
 
     def test_rejects_bad_arguments(self):
-        for kw in ({"max_positions": 0}, {"entry_timing": "nope"}, {"exit_timing": "nope"}):
+        for kw in ({"max_positions": 0}, {"first_dip": 0},
+                   {"entry_timing": "nope"}, {"exit_timing": "nope"}):
             with self.assertRaises(ValueError):
                 scale(**kw)
 
     def test_empty_input(self):
         self.assertEqual(rsi2.find_rsi2_scale_in_trades(make_bars([])), [])
+
+
+class TestFirstDip(unittest.TestCase):
+    """The video's closing question: skip the early dips and buy only the
+    deeper one. SCALE_CLOSES dips at 205, 207 and 209 within a single
+    oversold sequence, so first_dip selects among exactly those."""
+
+    def test_skips_earlier_dips_and_buys_the_nth(self):
+        for dip, idx in enumerate(SIGNAL_IDXS, start=1):
+            out = scale(max_positions=1, first_dip=dip)
+            self.assertEqual([p["entry_idx"] for p in out], [idx],
+                             f"first_dip={dip} should buy only bar {idx}")
+
+    def test_a_dip_that_never_arrives_trades_nothing(self):
+        self.assertEqual(scale(max_positions=1, first_dip=4), [])
+
+    def test_first_dip_one_is_the_plain_strategy(self):
+        self.assertEqual(scale(max_positions=1, first_dip=1),
+                         scale(max_positions=1))
+
+    def test_counter_resets_after_an_overbought_close(self):
+        """A second oversold sequence starts counting from one again, so
+        first_dip=1 buys the first dip of EACH sequence rather than only
+        the first of the whole series."""
+        # The RSI-95 rally leaves avg_gain near 20, so no single drop can
+        # reach 10 again without breaking the trend filter -- three small
+        # oscillation bars bring the averages down first, exactly as the
+        # base fixture does before its own first dip.
+        closes = list(SCALE_CLOSES)
+        for j in range(3):
+            closes.append(closes[-1] + (0.5 if j % 2 == 0 else -0.5))
+        closes.append(closes[-1] - 26)
+        second = len(closes) - 1
+        rsi = rsi2.wilder_rsi(closes, 2)
+        self.assertLess(rsi[second], 10.0)
+        self.assertEqual([i for i, s in enumerate(rsi2.rsi2_entry_signals(closes, 2, 10.0, SMA)) if s],
+                         SIGNAL_IDXS + [second])
+        out = scale(closes, max_positions=1, first_dip=1)
+        self.assertEqual([p["entry_idx"] for p in out], [SIGNAL_IDXS[0], second])
+        # And the counter really did reset: dip 3 of the FIRST sequence is
+        # still reachable, while there is no dip 3 in the second.
+        self.assertEqual([p["entry_idx"] for p in scale(closes, max_positions=1, first_dip=3)],
+                         [SIGNAL_IDXS[2]])
+
+    def test_deeper_dip_buys_a_lower_price(self):
+        firsts = [scale(max_positions=1, first_dip=d)[0]["entry_price"] for d in (1, 2, 3)]
+        self.assertEqual(firsts, sorted(firsts, reverse=True))
+
+    def test_first_dip_still_respects_max_positions(self):
+        # Start at dip 2 and allow two contracts: dips 2 and 3 fill.
+        out = scale(max_positions=2, first_dip=2)
+        self.assertEqual([p["entry_idx"] for p in out], SIGNAL_IDXS[1:])
+        self.assertEqual([p["position_num"] for p in out], [1, 2])
 
 
 class TestEquivalenceWithSinglePosition(unittest.TestCase):

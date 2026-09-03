@@ -64,6 +64,9 @@ def parse_args(argv=None) -> argparse.Namespace:
     parser.add_argument("--sma-period", type=int, default=DEFAULT_SMA_PERIOD)
     parser.add_argument("--max-sweep", type=int, default=6,
                         help="sweep max_positions from 1 to this (the video's own table goes to 6)")
+    parser.add_argument("--dip-sweep", type=int, default=None, metavar="N",
+                        help="instead of the max_positions sweep, take a SINGLE position on dip 1..N only "
+                             "(the video's closing question: skip the early dips, buy deeper weakness)")
     parser.add_argument("--stop-pct", type=float, default=None,
                         help="per-position stop; the video uses none")
     parser.add_argument("--entry-timing", type=str, default="close", choices=("close", "next_open"))
@@ -168,7 +171,12 @@ def main(argv=None) -> int:
     for window_name, window in WINDOWS.items():
         print(f"--- {window_name} "
               f"({window[0]} .. {window[1] or bars['date'][-1].date()}) ---")
-        for maxpos in range(1, args.max_sweep + 1):
+        if args.dip_sweep:
+            variants = [(1, d, f"dip{d}_only") for d in range(1, args.dip_sweep + 1)]
+        else:
+            variants = [(m, 1, f"max_pos={m}") for m in range(1, args.max_sweep + 1)]
+
+        for maxpos, first_dip, label in variants:
             positions = find_rsi2_scale_in_trades(
                 bars,
                 rsi_period=args.rsi_period,
@@ -176,14 +184,16 @@ def main(argv=None) -> int:
                 exit_level=args.exit_level,
                 sma_period=args.sma_period,
                 max_positions=maxpos,
+                first_dip=first_dip,
                 stop_pct=args.stop_pct,
                 entry_timing=args.entry_timing,
                 exit_timing=args.exit_timing,
             )
             windowed = [p for p in positions if in_window(p["entry_date"], *window)]
             s = summarize(windowed, bars, window, spec.multiplier, cost)
-            rows.append({"window": window_name, "max_positions": maxpos, **s})
-            print(f"  max_pos={maxpos}  {json.dumps(s)}")
+            rows.append({"window": window_name, "max_positions": maxpos,
+                         "first_dip": first_dip, **s})
+            print(f"  {label:12s} {json.dumps(s)}")
         print()
 
     if args.out_csv:
