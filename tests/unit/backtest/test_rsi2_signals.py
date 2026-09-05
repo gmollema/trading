@@ -268,5 +268,116 @@ class TestFindRsi2LongTrades(unittest.TestCase):
         self.assertEqual(rsi2.find_rsi2_long_trades(make_bars([])), [])
 
 
+class TestWilderAtr(unittest.TestCase):
+    def test_warmup_is_none_not_a_placeholder(self):
+        atr = rsi2.wilder_atr([3, 4, 5, 6], [1, 2, 3, 4], [2, 3, 4, 5], period=2)
+        self.assertEqual(atr[:2], [None, None])
+        self.assertIsNotNone(atr[2])
+
+    def test_too_few_bars_is_all_none(self):
+        self.assertEqual(rsi2.wilder_atr([2, 3], [1, 2], [1.5, 2.5], period=5), [None, None])
+
+    def test_seed_excludes_bar_zero_then_recurses(self):
+        # TR is 2 on every bar here (range 2, and the gaps are smaller), so
+        # the seed is 2 and the RMA stays at 2 however long it runs.
+        highs, lows, closes = [3, 4, 5, 6, 7], [1, 2, 3, 4, 5], [2, 3, 4, 5, 6]
+        atr = rsi2.wilder_atr(highs, lows, closes, period=2)
+        self.assertAlmostEqual(atr[2], 2.0)
+        self.assertAlmostEqual(atr[4], 2.0)
+
+    def test_a_range_spike_lifts_the_average_by_one_period_share(self):
+        highs, lows, closes = [3, 4, 5, 16], [1, 2, 3, 4], [2, 3, 4, 5]
+        atr = rsi2.wilder_atr(highs, lows, closes, period=2)
+        # prior ATR 2.0, spike TR = max(16-4, |16-4|, |4-4|) = 12
+        self.assertAlmostEqual(atr[3], (2.0 * 1 + 12) / 2)
+
+
+class TestTrailingMedian(unittest.TestCase):
+    def test_excludes_the_current_bar(self):
+        # With min_samples 2, bar 2's window is bars 0..1 only.
+        out = rsi2.trailing_median([1.0, 3.0, 100.0, 5.0], lookback=10, min_samples=2)
+        self.assertEqual(out[2], 3.0)
+
+    def test_none_until_min_samples(self):
+        out = rsi2.trailing_median([1.0, 2.0, 3.0], lookback=10, min_samples=3)
+        self.assertEqual(out, [None, None, None])
+
+    def test_skips_none_entries_when_counting(self):
+        out = rsi2.trailing_median([None, 1.0, 2.0, 3.0], lookback=10, min_samples=2)
+        self.assertIsNone(out[2])
+        self.assertIsNotNone(out[3])
+
+    def test_lookback_window_slides(self):
+        out = rsi2.trailing_median([1.0, 1.0, 1.0, 50.0, 50.0], lookback=2, min_samples=2)
+        self.assertEqual(out[4], 50.0)
+
+
+class TestRsi2RegimeOk(unittest.TestCase):
+    """The filter vetoes only when BOTH signs are bad, so each half is
+    tested on its own as well as the conjunction."""
+
+    def _bars(self, closes, highs=None, lows=None):
+        return make_bars(closes, highs=highs, lows=lows)
+
+    def test_above_short_trend_passes_even_when_volatile(self):
+        # Steadily rising closes: always above a short SMA. Widen the bars so
+        # ATR is far above its own median and the calm test must be failing.
+        closes = [100 + i for i in range(300)]
+        highs = [c + 50 for c in closes]
+        lows = [c - 50 for c in closes]
+        ok = rsi2.rsi2_regime_ok(self._bars(closes, highs, lows),
+                                 regime_sma_period=5, atr_period=3, atr_median_lookback=100)
+        self.assertTrue(ok[-1])
+
+    def test_calm_passes_even_when_below_the_short_trend(self):
+        # Rise, then drift below the short SMA on quiet bars: trend test
+        # fails, calm test carries it.
+        closes = [100 + i for i in range(200)] + [299 - i * 0.1 for i in range(60)]
+        ok = rsi2.rsi2_regime_ok(self._bars(closes),
+                                 regime_sma_period=20, atr_period=3, atr_median_lookback=100)
+        self.assertTrue(ok[-1])
+
+    def test_vetoes_when_below_trend_and_volatile(self):
+        closes = [100 + i for i in range(200)]
+        highs = [c + 0.5 for c in closes]
+        lows = [c - 0.5 for c in closes]
+        # A violent slide: below the short SMA and ATR far above its median.
+        # The step stays small enough to keep prices positive -- a negative
+        # close would make atr/close negative and pass the "calm" test for
+        # entirely the wrong reason.
+        for k in range(40):
+            closes.append(300 - k * 2)
+            highs.append(closes[-1] + 20)
+            lows.append(closes[-1] - 20)
+        ok = rsi2.rsi2_regime_ok(self._bars(closes, highs, lows),
+                                 regime_sma_period=20, atr_period=3, atr_median_lookback=100)
+        self.assertFalse(ok[-1])
+
+    def test_unknown_regime_vetoes_rather_than_guessing(self):
+        # Too short for either half to have a value at all.
+        ok = rsi2.rsi2_regime_ok(self._bars([100.0, 101.0, 102.0]))
+        self.assertEqual(ok, [False, False, False])
+
+
+class TestScaleInRegimeFilter(unittest.TestCase):
+    def _bars(self):
+        return make_bars(SIGNAL_CLOSES)
+
+    def test_off_by_default(self):
+        a = rsi2.find_rsi2_scale_in_trades(self._bars())
+        b = rsi2.find_rsi2_scale_in_trades(self._bars(), regime_filter=False)
+        self.assertEqual(a, b)
+
+    def test_filter_can_only_remove_trades(self):
+        base = rsi2.find_rsi2_scale_in_trades(self._bars(), sma_period=21)
+        filtered = rsi2.find_rsi2_scale_in_trades(
+            self._bars(), sma_period=21, regime_filter=True,
+            regime_sma_period=5, atr_period=3, atr_median_lookback=10)
+        self.assertLessEqual(len(filtered), len(base))
+        base_entries = {t["entry_idx"] for t in base}
+        for t in filtered:
+            self.assertIn(t["entry_idx"], base_entries)
+
+
 if __name__ == "__main__":
     unittest.main()

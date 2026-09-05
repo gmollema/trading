@@ -7,6 +7,11 @@ measured as equivalent to the backtested close-to-close one (6.43% CAGR
 vs 6.36% at $75k). See rsi2_live's module docstring for why the
 backtested fill itself is not reachable.
 
+The regime filter is ON in rsi2_rules.json (see rsi2_live's docstring):
+a decision of "regime_veto" in the log means a real dip signal existed
+and was turned down, which is different from "no_signal" and worth
+telling apart when reading a dry run.
+
 DRY RUN IS THE DEFAULT. This code places orders on a $50-a-point
 contract and has never been run. It logs exactly what it would do and
 touches nothing until invoked with --arm. That is a deliberate departure
@@ -35,7 +40,9 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import sys
 from datetime import date, datetime
+from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from dotenv import load_dotenv
@@ -44,6 +51,14 @@ from trading_bot import rsi2_live
 from trading_bot.util.heartbeat import write_heartbeat
 
 ET = ZoneInfo("America/New_York")
+# Written by log_event as well as stdout. The scheduled task runs under
+# pythonw with no console, so a shell redirect was the obvious way to keep
+# the decisions -- but Task Scheduler mangles the "&" needed to create the
+# directory first, and tests/integration/util/test_logger_it.py deletes
+# logs/ outright, so a redirect into a missing directory silently discards
+# every decision. Owning the file here means the cycle recreates the
+# directory itself and the task line stays as plain as smc_cycle's.
+CYCLE_LOG_PATH = Path("logs/rsi2_cycle.log")
 # Its own client id: sharing one with cycle.py (default), smc_cycle.py (4)
 # or the data fetcher (95) would have TWS drop one of the connections.
 DEFAULT_CLIENT_ID = 6
@@ -59,8 +74,27 @@ def parse_args(argv=None) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
-def log_event(payload: dict) -> None:
-    print(json.dumps({"ts": datetime.now(ET).isoformat(), **payload}))
+def log_event(payload: dict, path: Path | None = None) -> None:
+    """One JSON line to stdout and to the cycle log.
+
+    A logging failure must never take the cycle down with it: the point of
+    the run is the decision, and losing the record of it is strictly less
+    bad than not making it.
+    """
+    line = json.dumps({"ts": datetime.now(ET).isoformat(), **payload})
+    target = CYCLE_LOG_PATH if path is None else path
+    try:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        with target.open("a", encoding="utf-8") as f:
+            f.write(line + "\n")
+    except OSError:
+        pass
+    # The file comes FIRST and the console second. Under pythonw -- which is
+    # what the scheduled task runs -- there is no console, sys.stdout is None
+    # and print() raises; doing it the other way round threw before anything
+    # was ever written, and the task failed silently with an empty log.
+    if sys.stdout is not None:
+        print(line)
 
 
 def fetch_daily_bars(ib, contract) -> dict:
@@ -154,6 +188,7 @@ def main(argv=None) -> int:
         log_event({
             "event": "decision", "armed": args.arm, "action": decision["action"],
             "reason": decision["reason"], "rsi": decision["rsi"], "dip": decision["dip"],
+            "regime_ok": decision["regime_ok"],
             "signal_bar": decision["signal_bar_date"], "contracts": decision["contracts"],
             "bars_completed": len(bars["close"]),
             "held": None if position is None else position.get("local_symbol"),

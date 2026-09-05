@@ -36,6 +36,26 @@ Consequences worth stating plainly:
   - There is one decision per day. Missing a day means missing that
     day's entry or exit outright; there is no catch-up, because entering
     a day late is a different trade from the one that was backtested.
+
+THE REGIME FILTER
+-----------------
+`regime_filter` adds one veto on top of the strategy above, defined once
+in rsi2_signals.rsi2_regime_ok and shared with the backtest: refuse an
+entry when the close is under its 50-day SMA AND ATR(14) is at or above
+its own one-year median. Either sign alone still trades. Exits are never
+gated -- a filter that could trap an open position would be worse than
+no filter.
+
+It does not make money. Across 2005-2026 on ES daily bars it costs 10bp
+of CAGR (3.93% -> 3.83%) and buys a halving of risk: max drawdown 6.0%
+-> 3.4%, worst trade -$1,804 -> -$650, and the worst a new account ever
+goes under water $2,566 -> $1,100 per MES contract. The drawdown gain
+shows up in both halves of the sample independently, which is why it is
+credited; it also happens to veto the single worst trade in the record,
+by 5 index points out of 6,000, which is luck and is not the reason.
+
+Default OFF in DEFAULT_RULES so this module keeps describing the
+strategy as validated; rsi2_rules.json opts in.
 """
 
 from __future__ import annotations
@@ -46,11 +66,16 @@ from datetime import datetime
 from pathlib import Path
 
 from trading_bot.backtest.rsi2_signals import (
+    ATR_MEDIAN_MIN_SAMPLES,
+    DEFAULT_ATR_MEDIAN_LOOKBACK,
+    DEFAULT_ATR_PERIOD,
     DEFAULT_ENTRY_LEVEL,
     DEFAULT_EXIT_LEVEL,
+    DEFAULT_REGIME_SMA_PERIOD,
     DEFAULT_RSI_PERIOD,
     DEFAULT_SMA_PERIOD,
     rsi2_dip_sequence,
+    rsi2_regime_ok,
     wilder_rsi,
 )
 
@@ -83,6 +108,13 @@ DEFAULT_RULES = {
     "first_dip": 1,
     "min_days_to_expiry": 10,
     "max_contracts": 1,
+    # Regime filter, off in the defaults so this module still describes the
+    # strategy as originally validated; rsi2_rules.json turns it on. See
+    # rsi2_regime_ok for what it does and what it is worth.
+    "regime_filter": False,
+    "regime_sma_period": DEFAULT_REGIME_SMA_PERIOD,
+    "atr_period": DEFAULT_ATR_PERIOD,
+    "atr_median_lookback": DEFAULT_ATR_MEDIAN_LOOKBACK,
 }
 
 
@@ -109,6 +141,16 @@ def load_rules(path: Path = RSI2_RULES_PATH) -> dict:
         raise ValueError(f"first_dip must be >= 1, got {rules['first_dip']}")
     if rules["min_days_to_expiry"] < 1:
         raise ValueError("min_days_to_expiry must be >= 1")
+    if not isinstance(rules["regime_filter"], bool):
+        raise ValueError(f"regime_filter must be true or false, got {rules['regime_filter']!r}")
+    if rules["regime_sma_period"] < 1:
+        raise ValueError("regime_sma_period must be >= 1")
+    if rules["atr_period"] < 1:
+        raise ValueError("atr_period must be >= 1")
+    if rules["atr_median_lookback"] <= rules["atr_period"]:
+        raise ValueError(
+            f"atr_median_lookback ({rules['atr_median_lookback']}) must exceed atr_period "
+            f"({rules['atr_period']}) -- the median is taken over prior ATR readings")
     return rules
 
 
@@ -174,7 +216,9 @@ def decide(bars: dict, position: dict | None, rules: dict) -> dict:
     """What to do at today's open, given completed daily bars.
 
     Returns {"action": "buy"|"sell"|"hold", "reason", "rsi", "dip",
-    "signal_bar_date", "contracts"}.
+    "signal_bar_date", "contracts", "regime_ok"}. `regime_ok` is None when
+    the filter is off, and a "regime_veto" reason means a real dip signal
+    existed and the filter turned it down -- distinct from "no_signal".
 
     Mirrors find_rsi2_scale_in_trades' per-bar order exactly: an
     overbought close exits before anything else is considered, and only
@@ -185,6 +229,19 @@ def decide(bars: dict, position: dict | None, rules: dict) -> dict:
     closes = bars["close"]
     n = len(closes)
     need = max(rules["sma_period"], rules["rsi_period"] + 1)
+    if rules["regime_filter"]:
+        # Enough history for the filter to have an opinion, so that a veto
+        # always means "bad regime" and never "no data" -- the two must not
+        # look the same in the log.
+        #
+        # ATR_MEDIAN_MIN_SAMPLES, not atr_median_lookback: the median is
+        # allowed to form on a partial window, and that threshold is the
+        # backtest's too. Demanding a FULL window here instead cost 2 of 141
+        # trades in the 2004-2026 replay -- the live bot sat out entries the
+        # backtest took, purely because the two sides disagreed about when
+        # the indicator starts existing. One constant, both callers.
+        need = max(need, rules["regime_sma_period"],
+                   rules["atr_period"] + ATR_MEDIAN_MIN_SAMPLES + 1)
     if n < need:
         return {"action": "hold", "reason": f"need {need} bars, have {n}",
                 "rsi": None, "dip": 0, "signal_bar_date": None, "contracts": 0}
@@ -192,10 +249,17 @@ def decide(bars: dict, position: dict | None, rules: dict) -> dict:
     rsi = wilder_rsi(closes, rules["rsi_period"])
     dips = rsi2_dip_sequence(closes, rules["rsi_period"], rules["entry_level"],
                              rules["exit_level"], rules["sma_period"])
+    regime = (
+        rsi2_regime_ok(bars, rules["regime_sma_period"], rules["atr_period"],
+                       rules["atr_median_lookback"])
+        if rules["regime_filter"]
+        else None
+    )
     i = n - 1
     last_rsi = rsi[i]
     bar_date = str(_as_date(bars["date"][i]))
-    base = {"rsi": last_rsi, "dip": dips[i], "signal_bar_date": bar_date}
+    base = {"rsi": last_rsi, "dip": dips[i], "signal_bar_date": bar_date,
+            "regime_ok": None if regime is None else regime[i]}
 
     if position is not None:
         if last_rsi is not None and last_rsi > rules["exit_level"]:
@@ -204,6 +268,11 @@ def decide(bars: dict, position: dict | None, rules: dict) -> dict:
         return {**base, "action": "hold", "reason": "holding", "contracts": 0}
 
     if dips[i] >= rules["first_dip"] and dips[i] > 0:
+        # Reported distinctly from "no_signal": the dry-run log has to show
+        # the difference between a day the market offered nothing and a day
+        # the filter turned something down.
+        if regime is not None and not regime[i]:
+            return {**base, "action": "hold", "reason": "regime_veto", "contracts": 0}
         return {**base, "action": "buy", "reason": f"rsi2_dip_{dips[i]}",
                 "contracts": rules["contracts"]}
     return {**base, "action": "hold", "reason": "no_signal", "contracts": 0}

@@ -59,6 +59,16 @@ DEFAULT_ENTRY_LEVEL = 10.0
 DEFAULT_EXIT_LEVEL = 70.0
 DEFAULT_SMA_PERIOD = 200
 DEFAULT_STOP_POINTS = 200.0
+# Regime filter (rsi2_regime_ok). 50 is the conventional short trend against
+# the strategy's own 200; 14 is Wilder's ATR default; 252 is one year of
+# trading days, so ATR is judged against its own recent normal rather than
+# an absolute threshold that would mean different things at 1,200 and 7,700.
+DEFAULT_REGIME_SMA_PERIOD = 50
+DEFAULT_ATR_PERIOD = 14
+DEFAULT_ATR_MEDIAN_LOOKBACK = 252
+# Below this many prior readings the median is not a median, and the filter
+# reports "unknown" (None) rather than a number computed from a handful.
+ATR_MEDIAN_MIN_SAMPLES = 100
 # The video's optimized value; 1 = the undelayed first-profitable-close.
 DEFAULT_MIN_HOLD_DAYS = 12
 
@@ -129,6 +139,68 @@ def simple_moving_average(values: list[float], period: int) -> list[float | None
     return out
 
 
+def wilder_atr(
+    highs: list[float],
+    lows: list[float],
+    closes: list[float],
+    period: int = DEFAULT_ATR_PERIOD,
+) -> list[float | None]:
+    """Wilder's ATR -- an RMA of true range -- None on bars where it does
+    not yet exist.
+
+    Deliberately NOT reused from ut_bot_signals.wilder_atr, which
+    reproduces Pine's convention of back-filling the seed across bars
+    0..period-1 so ta.atr() always has a number to hand. That convention
+    belongs to the script it was translated from. Here the same reasoning
+    as wilder_rsi applies: a placeholder on a bar where the indicator does
+    not exist is exactly what manufactures a spurious signal, so those
+    bars report None.
+
+    Bar 0 has no previous close and so no true range; it is excluded from
+    the seed, which is the mean of true ranges 1..period.
+    """
+    n = len(closes)
+    if n <= period:
+        return [None] * n
+
+    tr = [0.0] * n
+    for i in range(1, n):
+        prev_close = closes[i - 1]
+        tr[i] = max(highs[i] - lows[i], abs(highs[i] - prev_close), abs(lows[i] - prev_close))
+
+    out: list[float | None] = [None] * n
+    out[period] = sum(tr[1 : period + 1]) / period
+    for i in range(period + 1, n):
+        out[i] = (out[i - 1] * (period - 1) + tr[i]) / period
+    return out
+
+
+def trailing_median(
+    values: list[float | None],
+    lookback: int,
+    min_samples: int = ATR_MEDIAN_MIN_SAMPLES,
+) -> list[float | None]:
+    """Median of up to `lookback` values from the bars STRICTLY BEFORE
+    each bar; None until `min_samples` of them exist.
+
+    Strictly prior matters. Including bar i would compare a reading
+    against a window it is itself part of, which pulls the threshold
+    toward the reading and blunts the comparison precisely when the
+    reading is extreme -- the case this exists to catch.
+
+    The midpoint element is taken rather than averaging the two middle
+    values on an even count; with a 252-bar window the difference is
+    immaterial and this is the definition the filter was measured with.
+    """
+    n = len(values)
+    out: list[float | None] = [None] * n
+    for i in range(n):
+        window = [v for v in values[max(0, i - lookback) : i] if v is not None]
+        if len(window) >= min_samples:
+            out[i] = sorted(window)[len(window) // 2]
+    return out
+
+
 def rsi2_entry_signals(
     closes: list[float],
     rsi_period: int = DEFAULT_RSI_PERIOD,
@@ -156,6 +228,54 @@ def rsi2_entry_signals(
         and rsi[i - 1] >= entry_level
         and rsi[i] < entry_level
         for i in range(len(closes))
+    ]
+
+
+def rsi2_regime_ok(
+    bars: dict,
+    regime_sma_period: int = DEFAULT_REGIME_SMA_PERIOD,
+    atr_period: int = DEFAULT_ATR_PERIOD,
+    atr_median_lookback: int = DEFAULT_ATR_MEDIAN_LOOKBACK,
+) -> list[bool]:
+    """True on bars where the regime permits an entry.
+
+    Stated as the veto it actually is: refuse the entry ONLY when both
+    warning signs are present at once -- the close has slipped under its
+    `regime_sma_period` SMA AND ATR is at or above its own trailing
+    median. Either sign alone still trades.
+
+    Why both rather than either: requiring both conditions to pass (the
+    "and" form) cuts 92 of 175 trades and takes CAGR to 3.26%; vetoing
+    only when both fail keeps 141 trades at 3.83%, for the same drawdown.
+    The conjunction throws away trades the disjunction proves were fine.
+
+    Measured on ES daily bars 2005-2026, against the unfiltered baseline:
+    max drawdown 6.0% -> 3.4%, worst trade -$1,804 -> -$650, CAGR 3.93%
+    -> 3.83%. The drawdown improvement appears independently in both
+    halves of the sample (4.0% -> 1.8%, then 7.6% -> 4.3%), which is the
+    reason to credit it. It is NOT credited to having dodged the single
+    worst trade, which it does by 5 index points out of 6,000 -- that
+    part is luck and should not be leaned on.
+
+    What it does not do is make money: no filter tested improved CAGR,
+    this one included. What it buys is the drawdown, and through it the
+    account size the strategy needs -- the worst a new account ever goes
+    under water falls from $2,566 to $1,100 per MES contract.
+
+    Costs O(n * atr_median_lookback). Immaterial for the ~500 bars the
+    live cycle passes; would want revisiting before running per-symbol
+    over a large universe.
+    """
+    closes = bars["close"]
+    n = len(closes)
+    sma = simple_moving_average(closes, regime_sma_period)
+    atr = wilder_atr(bars["high"], bars["low"], closes, atr_period)
+    atr_pct = [None if atr[i] is None else atr[i] / closes[i] * 100.0 for i in range(n)]
+    median = trailing_median(atr_pct, atr_median_lookback)
+    return [
+        (sma[i] is not None and closes[i] > sma[i])
+        or (atr_pct[i] is not None and median[i] is not None and atr_pct[i] < median[i])
+        for i in range(n)
     ]
 
 
@@ -369,6 +489,10 @@ def find_rsi2_scale_in_trades(
     stop_pct: float | None = None,
     exit_timing: str = "close",
     entry_timing: str = "close",
+    regime_filter: bool = False,
+    regime_sma_period: int = DEFAULT_REGIME_SMA_PERIOD,
+    atr_period: int = DEFAULT_ATR_PERIOD,
+    atr_median_lookback: int = DEFAULT_ATR_MEDIAN_LOOKBACK,
 ) -> list[dict]:
     """The scale-into-weakness variant from the YouTube video "2 Period RSI
     Trick for Mean Reversion Trading" (b4eCe9SdVBY, ~2023).
@@ -448,6 +572,15 @@ def find_rsi2_scale_in_trades(
 
     rsi = wilder_rsi(closes, rsi_period)
     signals = rsi2_entry_signals(closes, rsi_period, entry_level, sma_period)
+    # Off by default so every result already committed against this function
+    # stays reproducible; the live bot opts in through rsi2_rules.json. Both
+    # sides call rsi2_regime_ok, so only the on/off choice can differ between
+    # them, never the definition of the filter itself.
+    regime = (
+        rsi2_regime_ok(bars, regime_sma_period, atr_period, atr_median_lookback)
+        if regime_filter
+        else None
+    )
 
     out: list[dict] = []
     open_pos: list[dict] = []
@@ -516,6 +649,11 @@ def find_rsi2_scale_in_trades(
         # counter has reached `first_dip`.
         if signals[i]:
             dip_count += 1
+            # The dip is counted either way -- the counter tracks what the
+            # market did, not what we were willing to trade -- so a vetoed
+            # dip still advances `first_dip` for the rest of the sequence.
+            if regime is not None and not regime[i]:
+                continue
             if dip_count >= first_dip and len(open_pos) < max_positions:
                 if entry_timing == "close":
                     open_pos.append(_new_pos(campaign, len(open_pos) + 1, i, closes[i], dates[i], stop_pct))

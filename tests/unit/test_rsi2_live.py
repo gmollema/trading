@@ -308,5 +308,123 @@ class TestStateIO(unittest.TestCase):
             self.assertTrue(p.exists())
 
 
+def build_regime_closes():
+    """200 calm rising bars, then a stair-step slide (+1, +1, -10) that
+    stays above the SMA200 while breaking the short trend.
+
+    The shape is forced by needing both conditions at once: the entry
+    signal demands a close ABOVE the 200-SMA, while the regime veto
+    demands a close BELOW the short SMA in elevated volatility. Only a
+    market that has run far above its long trend and then started falling
+    hard satisfies both -- which is exactly the setup that produced the
+    worst trade in the real record (Feb 2025, +5.1% above the 200-day).
+    """
+    c = [100 + 5.0 * k for k in range(200)]
+    for _ in range(20):
+        c.append(c[-1] + 1.0)
+        c.append(c[-1] + 1.0)
+        c.append(c[-1] - 10.0)
+    return c
+
+
+REGIME_CLOSES = build_regime_closes()
+
+
+def make_regime_bars(closes, calm_n=200, wide=6.0):
+    """As make_bars, but the post-calm bars are deliberately wide so ATR
+    rises well above its own trailing median."""
+    b = make_bars(closes)
+    pad = [0.2 if i < calm_n else wide for i in range(len(closes))]
+    b["high"] = [max(b["open"][i], closes[i]) + pad[i] for i in range(len(closes))]
+    b["low"] = [min(b["open"][i], closes[i]) - pad[i] for i in range(len(closes))]
+    return b
+
+
+REGIME_BARS = make_regime_bars(REGIME_CLOSES)
+# Deliberately small windows so a 260-bar fixture can exercise the filter.
+REGIME_RULES = {**rsi2_live.DEFAULT_RULES, "sma_period": 200, "regime_filter": True,
+                "regime_sma_period": 20, "atr_period": 3, "atr_median_lookback": 100}
+
+
+class TestRegimeRules(unittest.TestCase):
+    def _write(self, tmp, payload):
+        p = Path(tmp) / "rsi2_rules.json"
+        p.write_text(json.dumps(payload))
+        return p
+
+    def test_off_by_default(self):
+        with TemporaryDirectory() as tmp:
+            rules = rsi2_live.load_rules(Path(tmp) / "absent.json")
+        self.assertFalse(rules["regime_filter"])
+
+    def test_bad_regime_settings_are_refused(self):
+        with TemporaryDirectory() as tmp:
+            for payload in ({"regime_filter": "yes"}, {"regime_filter": 1},
+                            {"regime_sma_period": 0}, {"atr_period": 0},
+                            {"atr_period": 14, "atr_median_lookback": 14},
+                            {"atr_period": 14, "atr_median_lookback": 5}):
+                with self.assertRaises(ValueError, msg=str(payload)):
+                    rsi2_live.load_rules(self._write(tmp, payload))
+
+    def test_a_valid_regime_config_loads(self):
+        with TemporaryDirectory() as tmp:
+            rules = rsi2_live.load_rules(self._write(tmp, {"regime_filter": True}))
+        self.assertTrue(rules["regime_filter"])
+        self.assertEqual(rules["atr_median_lookback"], 252)
+
+
+class TestDecideWithRegimeFilter(unittest.TestCase):
+    def test_regime_is_not_consulted_when_off(self):
+        bars = {k: v[:206] for k, v in BARS.items()}
+        d = rsi2_live.decide(bars, None, RULES)
+        self.assertIsNone(d["regime_ok"])
+        self.assertEqual(d["action"], "buy")
+
+    def test_buys_when_the_regime_allows_it(self):
+        # bar 205 is the first dip of the slide, still inside the short trend
+        bars = {k: v[:206] for k, v in REGIME_BARS.items()}
+        d = rsi2_live.decide(bars, None, REGIME_RULES)
+        self.assertEqual(d["action"], "buy")
+        self.assertEqual(d["reason"], "rsi2_dip_1")
+        self.assertTrue(d["regime_ok"])
+
+    def test_vetoes_a_dip_once_the_slide_is_established(self):
+        # bar 208 is the next dip: below the short SMA now, and ATR has
+        # risen above its median, so both warning signs are present.
+        bars = {k: v[:209] for k, v in REGIME_BARS.items()}
+        d = rsi2_live.decide(bars, None, REGIME_RULES)
+        self.assertEqual(d["action"], "hold")
+        self.assertEqual(d["reason"], "regime_veto")
+        self.assertFalse(d["regime_ok"])
+        self.assertGreater(d["dip"], 0)      # a real signal was turned down
+        self.assertLess(d["rsi"], 10)
+
+    def test_veto_never_blocks_an_exit(self):
+        """An open position must still be closed on an overbought close --
+        the filter gates entries only, and a veto that trapped a position
+        would be strictly worse than not having the filter."""
+        bars = {k: v[:209] for k, v in REGIME_BARS.items()}
+        overbought = {k: list(v) for k, v in bars.items()}
+        overbought["close"][-1] = overbought["close"][-2] + 500.0
+        d = rsi2_live.decide(overbought, {"contracts": 1}, REGIME_RULES)
+        self.assertEqual(d["action"], "sell")
+        self.assertEqual(d["reason"], "rsi_exit")
+
+    def test_short_history_reports_bars_needed_not_a_veto(self):
+        bars = {k: v[:150] for k, v in REGIME_BARS.items()}
+        d = rsi2_live.decide(bars, None, REGIME_RULES)
+        self.assertEqual(d["action"], "hold")
+        self.assertIn("need", d["reason"])
+        self.assertNotEqual(d["reason"], "regime_veto")
+
+    def test_need_uses_the_min_sample_threshold_the_backtest_uses(self):
+        """Regression: requiring a FULL atr_median_lookback window here made
+        the live bot skip entries the backtest took."""
+        rules = {**rsi2_live.DEFAULT_RULES, "regime_filter": True}
+        bars = {k: v[:210] for k, v in REGIME_BARS.items()}
+        d = rsi2_live.decide(bars, None, rules)
+        self.assertNotIn("need 253", d["reason"])
+
+
 if __name__ == "__main__":
     unittest.main()

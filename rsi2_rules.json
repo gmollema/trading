@@ -8,5 +8,9 @@
   "sma_period": 200,
   "first_dip": 1,
   "min_days_to_expiry": 10,
-  "max_contracts": 1
+  "max_contracts": 1,
+  "regime_filter": true,
+  "regime_sma_period": 50,
+  "atr_period": 14,
+  "atr_median_lookback": 252
 }
