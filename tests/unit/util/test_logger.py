@@ -1,6 +1,7 @@
 import unittest
+from pathlib import Path
+from tempfile import TemporaryDirectory
 from unittest.mock import patch
-import shutil
 
 from trading_bot.util import logger
 
@@ -9,18 +10,21 @@ class TestLogger(unittest.TestCase):
     """Isolated tests for the hardened filesystem logger component."""
 
     def setUp(self):
-        """Ensure a clean slate for file logging operations before each test."""
-        if logger.NOTIFY_ERRORS_LOG.exists():
-            logger.NOTIFY_ERRORS_LOG.unlink()
-        if logger.LOGS_DIR.exists():
-            shutil.rmtree(logger.LOGS_DIR)
+        """Redirect the logger's paths into a temporary directory.
 
-    def tearDown(self):
-        """Clean up generated test logs and folders after each test."""
-        if logger.NOTIFY_ERRORS_LOG.exists():
-            logger.NOTIFY_ERRORS_LOG.unlink()
-        if logger.LOGS_DIR.exists():
-            shutil.rmtree(logger.LOGS_DIR)
+        logger.LOGS_DIR is the repo-relative Path("logs"), so deleting it
+        here -- as this test used to -- destroyed the live bots' logs on
+        every full test run, and left scheduled tasks appending into a
+        directory that no longer existed. Same disk I/O, different place.
+        """
+        tmp = TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        logs_dir = Path(tmp.name) / "logs"
+        for attr, value in (("LOGS_DIR", logs_dir),
+                            ("NOTIFY_ERRORS_LOG", logs_dir / "notify_errors.log")):
+            p = patch.object(logger, attr, value)
+            p.start()
+            self.addCleanup(p.stop)
 
     def test_log_error_writes_successfully(self):
         """Verify that log_error safely dumps exception stack traces to disk."""

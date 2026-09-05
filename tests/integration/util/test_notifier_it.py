@@ -1,5 +1,7 @@
 from pathlib import Path
+from tempfile import TemporaryDirectory
 import unittest
+from unittest.mock import patch
 from dotenv import load_dotenv
 
 import pytest
@@ -19,9 +21,21 @@ class TestNotifyLiveIntegration(unittest.TestCase):
     """Integration test verifying real notification delivery to your actual channels."""
 
     def setUp(self):
-        """Clean up local logging engine targets before testing network side-effects."""
-        if logger.NOTIFY_ERRORS_LOG.exists():
-            logger.NOTIFY_ERRORS_LOG.unlink()
+        """Redirect the logger's paths into a temporary directory.
+
+        logger.LOGS_DIR is the repo-relative Path("logs"), so deleting it
+        here -- as this test used to -- destroyed the live bots' logs on
+        every full test run, and left scheduled tasks appending into a
+        directory that no longer existed. Same disk I/O, different place.
+        """
+        tmp = TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        logs_dir = Path(tmp.name) / "logs"
+        for attr, value in (("LOGS_DIR", logs_dir),
+                            ("NOTIFY_ERRORS_LOG", logs_dir / "notify_errors.log")):
+            p = patch.object(logger, attr, value)
+            p.start()
+            self.addCleanup(p.stop)
 
     def test_live_notification_delivery(self):
         """Fires live alerts using the real credentials loaded from your local .env file."""
