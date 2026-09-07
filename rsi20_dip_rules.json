@@ -1,0 +1,12 @@
+{
+  "symbol": "MES",
+  "exchange": "CME",
+  "contracts": 1,
+  "rsi_period": 20,
+  "ma_period": 200,
+  "offset_bars": 3,
+  "entry_level": 60,
+  "exit_level": 65,
+  "min_days_to_expiry": 10,
+  "max_contracts": 1
+}

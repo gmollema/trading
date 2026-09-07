@@ -76,7 +76,7 @@ REASON_TREND_BREAK = "trend_break"
 REASON_END_OF_DATA = "end_of_data"
 
 
-def _crossed_down(series: list[float | None], level: float, i: int) -> bool:
+def crossed_down(series: list[float | None], level: float, i: int) -> bool:
     """Pine's ta.crossunder(series, level) at bar i: strictly below now,
     at or above on the previous bar. A run of sub-level bars therefore
     produces ONE signal, on the first of them."""
@@ -89,7 +89,7 @@ def _crossed_down(series: list[float | None], level: float, i: int) -> bool:
     )
 
 
-def _crossed_up(series: list[float | None], level: float, i: int) -> bool:
+def crossed_up(series: list[float | None], level: float, i: int) -> bool:
     """Pine's ta.crossover(series, level) at bar i."""
     return (
         i > 0
@@ -190,14 +190,14 @@ def find_rsi20_dip_trades(
         # 2. Exit before entry, so an exit and a re-entry cannot collide
         # on one bar and so the trade order matches the reference's.
         if pos is not None:
-            if _crossed_up(rsi, exit_level, i):
+            if crossed_up(rsi, exit_level, i):
                 pending_exit_reason = REASON_RSI_EXIT
             elif closes[i] < trend[i]:
                 pending_exit_reason = REASON_TREND_BREAK
             continue
 
         # 3. A fresh crossing down through entry_level, in an uptrend.
-        if closes[i] > shifted[i] and _crossed_down(rsi, entry_level, i):
+        if closes[i] > shifted[i] and crossed_down(rsi, entry_level, i):
             pending_entry = True
 
     if pos is not None:
