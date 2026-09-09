@@ -43,18 +43,40 @@ paper TWS (the default), 7496 is live.
 
 DO NOT RUN THIS AND THE FUTURES VARIANT ON THE SAME EXPOSURE. They are
 different instruments so IBKR will not net them, which is worse, not
-better: you would hold 3x of the account in an ETP and $38,800 of index
-in MES, each state file claiming to be the whole position.
+better: you would hold a leveraged ETF position AND $38,800 of index in
+MES, with each state file claiming to be the whole position.
 
-To schedule it once you trust it (deliberately NOT added to
-setup_schedule.py, which would revive the disabled gap-and-go tasks as a
-side effect). The window is wide because Task Scheduler works in local
-time while 09:25-09:45 ET is 15:26 local most of the year and 14:26 in
-the weeks US and EU clocks disagree:
+THE SCHEDULED TASK
+------------------
+Registered as HT_RSI20DipETF_DryRun on 2026-09-09, enabled, dry run.
+Created by cloning HT_RSI2_DryRun's XML rather than by running
+setup_schedule.py -- that script would revive the disabled gap-and-go
+tasks as a side effect:
 
-    powershell -Command "$a=New-ScheduledTaskAction -Execute
-      '<repo>\\.venv\\Scripts\\pythonw.exe' -Argument
-      '-m trading_bot.cli.rsi20_dip_etf_cycle' -WorkingDirectory '<repo>' ..."
+    $xml = Export-ScheduledTask -TaskName 'HT_RSI2_DryRun'
+    $xml = $xml -replace 'trading_bot\.cli\.rsi2_cycle', \
+                         'trading_bot.cli.rsi20_dip_etf_cycle'
+    $xml = $xml -replace '<Enabled>false</Enabled>', '<Enabled>true</Enabled>'
+    Register-ScheduledTask -TaskName 'HT_RSI20DipETF_DryRun' -Xml $xml
+
+It fires Mon-Fri every 5 minutes from 14:00 local for two hours, and
+in_decision_window is what makes all but a handful of those firings a
+no-op. That looks wasteful and is deliberate: Task Scheduler works in
+LOCAL time while the window is 09:25-09:45 ET, which is 15:25 local most
+of the year and 14:25 in the weeks US and EU clocks disagree. A two-hour
+repeat spans both, so no DST transition can silently skip a trading day.
+The firings outside the window return before the broker import, so they
+cost nothing.
+
+Verified under the scheduler on 2026-09-09: LastTaskResult 0, and the
+run appended an outside_decision_window line. That is the case worth
+testing, because the task runs pythonw where sys.stdout is None -- see
+log_event, which writes the file BEFORE the console for that reason.
+
+TWS must be running at 09:30 ET or the log fills with connect_failed
+instead of decisions. To stop it:
+
+    Disable-ScheduledTask -TaskName 'HT_RSI20DipETF_DryRun'
 """
 
 from __future__ import annotations
