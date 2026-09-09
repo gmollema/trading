@@ -6,23 +6,25 @@ WHY THIS VARIANT EXISTS
 -----------------------
 One MES contract is ~$38,800 of index. A EUR 500 account cannot post the
 ~$2,000 overnight margin, and at 70x leverage a 1.4% adverse move would
-liquidate it. A daily-rebalanced 3x ETF gets leveraged exposure with no
-margin, no liquidation and no expiry, sized to whatever cash is there.
+liquidate it. A daily-rebalanced leveraged ETF gets leveraged exposure
+with no margin, no liquidation and no expiry, sized to whatever cash is
+there.
 
 THE SIGNAL IS COMPUTED ON THE INDEX, NOT ON THE ETP
 ---------------------------------------------------
-This is the load-bearing design decision. RSI(20) on a 3x fund is NOT
-RSI(20) on its index: tripling every daily return pushes the oscillator
+This is the load-bearing design decision. RSI(20) on a 2x fund is NOT
+RSI(20) on its index: doubling every daily return pushes the oscillator
 to more extreme values, so the 60/65 levels -- already only fitted to US
 large-cap behaviour -- would mean something different applied to the
 fund's own price. `signal_symbol` is therefore the index proxy (SPY) and
 `trade_symbol` the ETP, and they are deliberately separate keys.
+load_rules rejects setting them equal.
 
 WHAT LEVERAGE ACTUALLY DID, MEASURED
 ------------------------------------
 Signals on ^GSPC 2008-2026, exposure through a synthetic Nx
 daily-rebalanced fund, costs = expense ratio + (N-1) x financing on days
-held only, no commission:
+held only, no commission. Reproduce with cli/rsi20_dip_etf_backtest.py:
 
     variant                   CAGR    maxDD    x money
     buy & hold index         9.41%    53.3%      5.36x
@@ -36,52 +38,52 @@ plain index, because volatility decay compounds against it. The strategy
 beats it only by being out of the market ~50% of the time, and out
 during the worst of it.
 
+WHY 2x AND NOT 3x, AT THIS ACCOUNT SIZE
+---------------------------------------
+Not a view on leverage -- an order-size constraint. Both resolved
+against a live TWS on 2026-09-09:
+
+    3USL  WisdomTree S&P 500 3x Daily Leveraged.  ETN.  ~$188.
+          IBKR sizeIncrement 1.0 -- WHOLE SHARES ONLY.
+    XS2D  Xtrackers S&P 500 2x Leveraged Daily Swap.  UCITS ETF.  ~$357.
+          IBKR sizeIncrement 0.0001 -- fractional.
+
+A 500 allocation buys two whole 3USL shares: 75% invested, a quarter of
+the account idle in cash, and 2.26x effective leverage rather than 3x.
+Walking the account as cash + position (no intra-trade rebalance) rather
+than assuming full investment:
+
+    2008-2026                CAGR    maxDD      2015-2026    CAGR    maxDD
+    buy & hold index        9.41%    53.3%      index       12.04%   33.9%
+    3USL 3x, 2 shares       9.10%    32.3%      3x, 2 sh     9.53%   32.3%
+    3USL 3x, fully in      12.33%    44.2%      3x, full    13.05%   44.2%
+    XS2D 2x, fractional     9.76%    31.6%      2x, frac    10.15%   31.6%
+
+Quantised 3x LOSES to buy-and-hold in both windows: the leverage only
+pays when it is actually deployed. Fractional 2x beats it, because it
+deploys everything. Whole-share 3x stops being dominated by rounding
+somewhere around $1,900 (10 shares, 91.7% invested, 2.75x), so raising
+the capital -- not changing the instrument -- is what unlocks 3x.
+
 AND THE HONEST CAVEAT, ONCE
 ---------------------------
-Split by window, the advantage is not stable. 2015-2026: 3x returns
-12.96% against the index's 12.04% while carrying a 44% drawdown against
-its 34%. 2x LOSES to the index over that window (9.99%). The full-sample
-win leans on sitting out 2008-09. Treat this as roughly a coin flip
-against a plain index fund with more volatility, not as an edge.
+Fractional 2x still returns 10.15% against the index's 12.04% over
+2015-2026, with a 31.6% drawdown against its 33.9%. Slightly less
+drawdown for two points less return. Over the full sample it is
+9.76% against 9.41% with 31.6% against 53.3%, which is the better
+trade -- but that edge leans on sitting out 2008-09. Treat this as
+roughly a coin flip against a plain index fund, not as an edge. It is
+wired because it was asked for.
 
 EU ACCESS: NOT UPRO
 -------------------
 UPRO and SSO are US-domiciled, have no PRIIPs KID, and are blocked for
-EU retail accounts. The default is a UCITS/ETN wrapper listed in Europe:
-3USL on LSEETF, verified to qualify against a live TWS on 2026-09-09.
-Leveraged ETPs usually require a broker appropriateness test before the
-permission is granted. Run --check after any change to the instrument.
-
-WHOLE SHARES RUIN THIS AT 500, MEASURED
----------------------------------------
-3USL costs $183.32 and IBKR reports sizeIncrement 1.0 for it, so ~$540
-of converted capital buys TWO shares: 67.9% invested, 2.04x nominal
-leverage, and a third of the account sitting in cash earning nothing.
-Walking the account (cash + position, no intra-trade rebalance) rather
-than assuming full investment:
-
-    2008-2026                CAGR    maxDD
-    buy & hold index        9.41%    53.3%
-    3USL 3x, 2 shares       9.10%    32.3%
-    3USL 3x, fully in      12.33%    44.2%
-
-    2015-2026                CAGR    maxDD
-    buy & hold index       12.04%    33.9%
-    3USL 3x, 2 shares       9.53%    32.3%
-    3USL 3x, fully in      13.05%    44.2%
-
-At this size the quantised version LOSES to buy-and-hold in both
-windows. The leverage only pays when it is actually deployed, and the
-share price is a third of the account. Whole-share granularity needs
-~$1,900 (10 shares, 91.7% invested, 2.75x) before it stops dominating
-the result.
-
-XS2D on LSEETF (Xtrackers S&P 500 2x Leveraged Daily Swap, a real UCITS
-ETF rather than an ETN) reports sizeIncrement 0.0001 -- fractional, so
-100% invested at exactly 2.00x, which measured 9.76%/31.6% and
-10.15%/31.6% over those windows. Better than the quantised 3x and still
-short of the index post-2015. `shares_for` floors to whole shares, so
-using it needs fractional sizing added first.
+EU retail accounts. Both instruments above are European listings, on
+venue LSEETF -- NOT 'LSE', which returns no security definition.
+Leveraged ETPs usually require a broker appropriateness test, and
+fractional orders require fractional trading to be enabled on the
+account. Run --check after any change to the instrument; it prints the
+increment-aware sizing and the leverage actually taken on.
 
 FX IS NOT HANDLED, DELIBERATELY
 -------------------------------
@@ -136,16 +138,26 @@ DEFAULT_RULES = {
     "signal_exchange": "SMART",
     "signal_currency": "USD",
     "signal_primary_exchange": "ARCA",
-    # The 3x S&P 500 ETP actually traded. Resolved against a live TWS on
-    # 2026-09-09: WisdomTree S&P 500 3x Daily Leveraged, conId 118833789,
-    # $183.32. The venue is LSEETF, NOT 'LSE' -- 'LSE' returns no security
-    # definition. It is an ETN (issuer credit risk), and IBKR reports
-    # sizeIncrement 1.0, so WHOLE SHARES ONLY. See the sizing note below.
-    "trade_symbol": "3USL",
+    # The leveraged ETF actually traded. Resolved against a live TWS on
+    # 2026-09-09: Xtrackers S&P 500 2x Leveraged Daily Swap UCITS ETF,
+    # conId 79000389, $357.33, hours 09:00-17:50 London (so a 14:30 fill
+    # is mid-session). The venue is LSEETF, NOT 'LSE' -- 'LSE' returns no
+    # security definition.
+    #
+    # 2x rather than 3x, deliberately: the 3x line (3USL) is an ETN that
+    # only accepts WHOLE shares at ~$188, which strands a quarter of a
+    # 500 account in cash and delivers 2.26x anyway. This one reports
+    # sizeIncrement 0.0001, so the capital is fully deployed at exactly
+    # 2.00x -- and it is a real UCITS ETF rather than unsecured issuer
+    # debt. See the measured table above.
+    "trade_symbol": "XS2D",
     "trade_exchange": "LSEETF",
     "trade_currency": "USD",
     "trade_primary_exchange": "",
-    "trade_leverage": 3,
+    "trade_leverage": 2,
+    # IBKR's own sizeIncrement for trade_symbol. 1.0 for whole-share
+    # instruments; read it off --check rather than assuming.
+    "size_increment": 0.0001,
     # The allocation, in trade_currency. Capped by real account equity at
     # runtime, so this can safely sit inside a bigger account.
     "capital": 500.0,
@@ -201,6 +213,10 @@ def load_rules(path: Path = RULES_PATH) -> dict:
             f"sizing_buffer must be in (0, 1], got {rules['sizing_buffer']}")
     if rules["max_shares"] < 1:
         raise ValueError(f"max_shares must be >= 1, got {rules['max_shares']}")
+    if not 0 < rules["size_increment"] <= 1:
+        raise ValueError(
+            f"size_increment must be in (0, 1], got {rules['size_increment']} -- "
+            f"it is IBKR's sizeIncrement for the contract, 1.0 for whole shares")
     if rules["trade_leverage"] < 1:
         raise ValueError(f"trade_leverage must be >= 1, got {rules['trade_leverage']}")
     if not rules["signal_symbol"] or not rules["trade_symbol"]:
@@ -236,8 +252,8 @@ def decide_action(bars: dict, position: dict | None, rules: dict) -> dict:
     the first time it holds a position -- which is how this was found.
     """
     out = _decide_contracts(bars, position, {**rules, "contracts": 1})
-    held = int(position.get("shares", 0)) if position else 0
-    shares = held if out["action"] == "sell" else 0
+    held = float(position.get("shares", 0.0)) if position else 0.0
+    shares = held if out["action"] == "sell" else 0.0
     return {k: v for k, v in out.items() if k != "contracts"} | {"shares": shares}
 
 
@@ -260,17 +276,23 @@ def usable_capital(rules: dict, account_equity: float | None,
 
 
 def shares_for(capital: float, price: float, rules: dict) -> dict:
-    """How many whole shares to buy, and how much of the capital that
-    leaves unused.
+    """How much to buy, rounded DOWN to the instrument's order-size
+    increment, and how much of the capital that leaves unused.
 
     Returns {"shares", "notional", "idle_cash", "idle_pct"}.
 
-    The idle figure is returned rather than merely tolerated because at
-    this account size it is the dominant sizing error: 500 of capital
-    against a ~$100 ETP buys 4 shares and leaves ~20% of the account in
-    cash, which silently turns a 3x strategy into a 2.4x one. A caller
-    that finds idle_pct high should either raise the capital or pick a
-    lower-priced listing -- it is not a bug to be rounded away.
+    `size_increment` is IBKR's own `sizeIncrement` from the contract
+    details, and it is the difference between this strategy working at
+    500 and not. An ETN like 3USL reports 1.0 -- whole shares only -- so
+    a $188 share price leaves a quarter of a 500 account in cash and
+    turns a 3x fund into 2.26x. A fractional ETF like XS2D reports
+    0.0001, which deploys essentially all of it. Set it from --check's
+    output, never by assumption: ordering 1.3572 shares of something that
+    only accepts whole ones is a rejected order.
+
+    The idle figure is returned rather than merely tolerated, because
+    whenever the increment is coarse relative to the capital it is the
+    dominant sizing error and it silently reduces leverage.
 
     Raises:
         ValueError: if price is not positive. A zero price means the
@@ -279,8 +301,18 @@ def shares_for(capital: float, price: float, rules: dict) -> dict:
     """
     if price <= 0:
         raise ValueError(f"price must be > 0 to size a position, got {price}")
+    increment = rules["size_increment"]
     budget = capital * rules["sizing_buffer"]
-    shares = min(int(math.floor(budget / price)), rules["max_shares"])
+    # Floor to a whole number of increments. The epsilon absorbs binary
+    # representation error -- without it a budget that divides exactly
+    # loses a full increment, since 485/357.33/0.0001 evaluates to
+    # 13572.999999... rather than 13573.
+    units = math.floor(budget / price / increment + 1e-9)
+    shares = min(max(units, 0) * increment, float(rules["max_shares"]))
+    # Re-quantise after the max_shares clamp, which can land off-grid,
+    # and drop float dust that would otherwise reach the order as
+    # 1.3572000000000002.
+    shares = round(math.floor(shares / increment + 1e-9) * increment, 8)
     notional = shares * price
     idle = max(capital - notional, 0.0)
     return {

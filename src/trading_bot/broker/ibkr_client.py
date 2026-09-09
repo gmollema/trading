@@ -193,7 +193,7 @@ class IBKRClient:
             self.ib.qualifyContracts(stock),
             f"{symbol} on {exchange} in {currency}")
 
-    def place_stock_order(self, contract: Stock, side: str, quantity: int,
+    def place_stock_order(self, contract: Stock, side: str, quantity: float,
                           outside_rth: bool = False) -> Trade:
         """Market order on an already-qualified stock/ETF contract.
 
@@ -203,12 +203,20 @@ class IBKRClient:
         to multiples of the edge this strategy is trying to collect. A
         rejected order is recoverable; a 1% slip on entry is not.
 
+        `quantity` is a float, not an int: a fractional ETF (XS2D reports
+        sizeIncrement 0.0001) is ordered in fractions of a share, and a
+        500 account buying a $357 share has no whole-share option at all.
+        So the guard is > 0, NOT >= 1 -- rejecting 0.75 shares here would
+        reject every order this strategy places. The caller is
+        responsible for quantising to the contract's own increment;
+        rsi20_dip_etf_live.shares_for does that.
+
         Takes a contract rather than a symbol so the caller has to have
         resolved the venue first -- same reasoning as place_futures_order.
         """
         if side not in ("BUY", "SELL"):
             raise ValueError(f"Invalid order side: {side!r} (expected 'BUY' or 'SELL')")
-        if quantity < 1:
+        if quantity <= 0:
             raise ValueError(f"Invalid quantity: {quantity!r}")
 
         order = MarketOrder(side, quantity)

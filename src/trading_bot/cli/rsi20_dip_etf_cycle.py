@@ -178,7 +178,7 @@ def resolve_contracts(ibkr, rules: dict):
     return signal, trade
 
 
-def record_fill(trade, contract, side: str, shares: int, reason: str,
+def record_fill(trade, contract, side: str, shares: float, reason: str,
                 signal_bar_date: str | None) -> dict:
     """Trade-log row from a settled order. avgFillPrice is 0.0 on an
     accepted-but-unfilled order and is recorded as-is rather than guessed
@@ -224,16 +224,18 @@ def run_check(ibkr, rules: dict, now_et: datetime) -> int:
         "account_currency": equity_ccy,
         "capital_used": round(capital, 2),
         "shares": sized["shares"],
+        "size_increment": rules["size_increment"],
         "notional": round(sized["notional"], 2),
         "idle_cash": round(sized["idle_cash"], 2),
         "idle_pct": round(sized["idle_pct"], 1),
         "effective_leverage": round(etf.effective_leverage(sized, capital, rules), 2),
         "configured_leverage": rules["trade_leverage"],
     })
-    if sized["shares"] < 1:
+    if sized["shares"] <= 0:
         log_event({"event": "check_failed",
-                   "error": f"capital {capital:.2f} buys no whole shares at "
-                            f"{price:.2f} -- pick a lower-priced listing or add funds"})
+                   "error": f"capital {capital:.2f} buys nothing at {price:.2f} with "
+                            f"size_increment {rules['size_increment']} -- add funds, or "
+                            f"check the increment is really the contract's"})
         return 1
     return 0
 
@@ -300,10 +302,11 @@ def main(argv=None) -> int:
             trade_bars = fetch_daily_bars(ibkr.ib, trade_contract)
             sized = etf.shares_for(capital, last_completed_close(trade_bars, now_et), rules)
             decision = {**decision, "shares": sized["shares"]}
-            if sized["shares"] < 1:
+            if sized["shares"] <= 0:
                 log_event({"event": "buy_skipped_unfundable",
                            "capital": round(capital, 2),
-                           "reason": "capital buys no whole shares"})
+                           "size_increment": rules["size_increment"],
+                           "reason": "capital buys less than one size increment"})
                 write_heartbeat(etf.HEARTBEAT_PATH, "unfundable")
                 return 0
 
@@ -333,8 +336,10 @@ def main(argv=None) -> int:
             write_heartbeat(etf.HEARTBEAT_PATH, "dry_run")
             return 0
 
-        shares = int(decision.get("shares", 0))
-        if shares < 1:
+        # float, not int: fractional orders are the whole point of the
+        # XS2D default, and int() would floor 1.3572 shares to 1.
+        shares = float(decision.get("shares", 0.0))
+        if shares <= 0:
             log_event({"event": "order_skipped", "reason": "no shares to trade",
                        "action": decision["action"]})
             write_heartbeat(etf.HEARTBEAT_PATH, "no_shares")
