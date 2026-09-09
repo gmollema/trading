@@ -19,9 +19,22 @@ smc_watchlist.txt
 # UT Bot runtime state (mirrors the gap-and-go / SMC bots' ignored state files)
 ut_bot_open_positions.json
 
+# RSI(2) / RSI(20) dip runtime state. The rules JSONs ARE tracked -- they
+# are configuration -- but positions, fills and heartbeats are per-machine
+# state written by the cycles.
+rsi2_open_positions.json
+rsi2_trades.csv
+rsi20_dip_open_positions.json
+rsi20_dip_trades.csv
+rsi20_dip_etf_open_positions.json
+rsi20_dip_etf_trades.csv
+
 # Heartbeat files written by cycle.py/smc_cycle.py for heartbeat_monitor.py
 heartbeat.json
 smc_heartbeat.json
+rsi2_heartbeat.json
+rsi20_dip_heartbeat.json
+rsi20_dip_etf_heartbeat.json
 
 # IDE / test cache / local Claude Code settings -- machine-specific, not shared
 .idea/
