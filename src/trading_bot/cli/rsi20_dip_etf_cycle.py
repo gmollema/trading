@@ -1,6 +1,13 @@
 r"""Scheduled daily entrypoint for the RSI(20) dip strategy traded through
 a leveraged ETF (see rsi20_dip_etf_live.py).
 
+DROPPED 2026-09-09. HT_RSI20DipETF_DryRun IS DISABLED.
+------------------------------------------------------
+Nothing was armed and no money was committed. Re-enabling the task is
+one command, so read the verdict in rsi20_dip_etf_live.py first: at its
+best sizing this returns 12.46% against a plain index fund's 12.04%
+while carrying 42% drawdown against 34%.
+
 Runs ONCE per trading day a few minutes before the 09:30 ET open and does
 nothing at any other time. Decides from the last COMPLETED daily bar of
 the INDEX PROXY and fills the ETP with a market order at the US open --

@@ -2,6 +2,31 @@
 a LEVERAGED ETF instead of a futures contract
 (cli/rsi20_dip_etf_cycle.py).
 
+DROPPED 2026-09-09. NOT RUNNING, AND THE NUMBERS SAY DO NOT RESTART IT.
+----------------------------------------------------------------------
+HT_RSI20DipETF_DryRun is DISABLED. Nothing was ever armed and no money
+was ever committed. The code is kept because the measurements below are
+the useful output -- they are what closed the question.
+
+At its best achievable sizing the strategy is a wash against a plain
+index fund: $1,000 of capital gives 2.82x and 12.46% CAGR over
+2015-2026, against the index's 12.04%, while carrying a 42% drawdown
+against its 34%. Eight points of extra drawdown for four tenths of a
+point of return. The full-sample column looks better only because the
+strategy sat out 2008-09, and one crash avoided nineteen years ago is
+not an edge you can count on again.
+
+Before reviving it, know what the earlier work already settled:
+  - Futures are unfundable at this size (one MES contract is $38,800 of
+    index against a ~$2,000 overnight margin).
+  - Fractional orders are refused over the API, IBKR error 10243, so
+    whole-share rounding is unavoidable and it costs 25% of the target
+    leverage at 500 of capital.
+  - entry_level 60 is fitted to US large-cap 2008-2026; the 55-60 ridge
+    does not exist on the DAX, FTSE, Nikkei or Euro Stoxx.
+Raising the capital is the only lever that improves it, and it tops out
+near 2.9x for a fraction of a point.
+
 WHY THIS VARIANT EXISTS
 -----------------------
 One MES contract is ~$38,800 of index. A EUR 500 account cannot post the
