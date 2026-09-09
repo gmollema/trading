@@ -1,4 +1,4 @@
-"""Scheduled daily entrypoint for the RSI(20) dip strategy traded through
+r"""Scheduled daily entrypoint for the RSI(20) dip strategy traded through
 a leveraged ETF (see rsi20_dip_etf_live.py).
 
 Runs ONCE per trading day a few minutes before the 09:30 ET open and does
