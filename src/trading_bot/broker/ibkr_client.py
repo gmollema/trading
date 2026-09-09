@@ -21,6 +21,37 @@ ORDER_SETTLE_TIMEOUT_SECS = 10
 MARKET_DATA_TYPE = 3
 
 
+def _first_qualified(qualified, description: str):
+    """The single qualified contract from a qualifyContracts result.
+
+    ib_async does NOT return a short list on failure: it returns one slot
+    PER REQUESTED CONTRACT and puts None in the slot when the contract is
+    unknown OR ambiguous. So `[None]` is truthy, a bare `if not qualified`
+    passes, and the None flows onward until something dereferences it --
+    which surfaced as `AttributeError: 'NoneType' object has no attribute
+    'includeExpired'` from deep inside reqContractDetails, six calls from
+    the actual mistake (a EU leveraged ETP requested on 'LSE' when its
+    venue is 'LSEETF').
+
+    Raises:
+        RuntimeError: naming both possible causes, since IBKR does not
+            distinguish them here. The ambiguity case is real for tickers
+            that exist on several venues -- pass primary_exchange then.
+    """
+    contracts = [c for c in (qualified or []) if c is not None]
+    if not contracts:
+        raise RuntimeError(
+            f"could not qualify {description} -- either the ticker/venue/currency "
+            f"combination does not exist, or it is ambiguous across venues. Check "
+            f"the exchange name in particular (LSE-listed ETPs are on 'LSEETF'), "
+            f"and that the account has market data and trading permissions for it")
+    if len(contracts) > 1:
+        venues = ",".join(sorted({c.primaryExchange or c.exchange for c in contracts}))
+        raise RuntimeError(
+            f"{description} is ambiguous across {venues} -- set primary_exchange")
+    return contracts[0]
+
+
 class IBKRClient:
     """Small convenience wrapper around ib_async.IB for this bot's needs."""
 
@@ -43,10 +74,11 @@ class IBKRClient:
             raise ValueError(f"Invalid order side: {side!r} (expected 'BUY' or 'SELL')")
 
         stock = Stock(symbol, "SMART", "USD")
-        qualified = self.ib.qualifyContracts(stock)
-        if not qualified:
-            raise RuntimeError(f"Could not qualify contract for symbol: {symbol}")
-        contract = qualified[0]
+        # Via _first_qualified, not a bare truthiness check: an unknown
+        # ticker comes back as [None], which used to pass the check and
+        # place a market order against a None contract.
+        contract = _first_qualified(self.ib.qualifyContracts(stock),
+                                    f"{symbol} on SMART in USD")
 
         order = MarketOrder(side, quantity)
         order.outsideRth = True
@@ -157,17 +189,9 @@ class IBKRClient:
         stock = Stock(symbol, exchange, currency)
         if primary_exchange:
             stock.primaryExchange = primary_exchange
-        qualified = self.ib.qualifyContracts(stock)
-        if not qualified:
-            raise RuntimeError(
-                f"could not qualify {symbol} on {exchange} in {currency} -- check the "
-                f"ticker, and that the account has trading permissions for that venue")
-        if len(qualified) > 1 and not primary_exchange:
-            venues = ",".join(sorted({c.primaryExchange or c.exchange for c in qualified}))
-            raise RuntimeError(
-                f"{symbol} on {exchange} is ambiguous across {venues} -- "
-                f"set primary_exchange to pick one")
-        return qualified[0]
+        return _first_qualified(
+            self.ib.qualifyContracts(stock),
+            f"{symbol} on {exchange} in {currency}")
 
     def place_stock_order(self, contract: Stock, side: str, quantity: int,
                           outside_rth: bool = False) -> Trade:

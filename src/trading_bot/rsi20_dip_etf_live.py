@@ -47,11 +47,41 @@ against a plain index fund with more volatility, not as an edge.
 EU ACCESS: NOT UPRO
 -------------------
 UPRO and SSO are US-domiciled, have no PRIIPs KID, and are blocked for
-EU retail accounts. The default `trade_symbol` is a UCITS-wrapped LSE
-listing instead. Verify it qualifies in YOUR account before trusting it
--- run the cycle with --check, which resolves both contracts and prints
-the sizing without placing anything. Leveraged ETPs also usually require
-a broker appropriateness test before the permission is granted.
+EU retail accounts. The default is a UCITS/ETN wrapper listed in Europe:
+3USL on LSEETF, verified to qualify against a live TWS on 2026-09-09.
+Leveraged ETPs usually require a broker appropriateness test before the
+permission is granted. Run --check after any change to the instrument.
+
+WHOLE SHARES RUIN THIS AT 500, MEASURED
+---------------------------------------
+3USL costs $183.32 and IBKR reports sizeIncrement 1.0 for it, so ~$540
+of converted capital buys TWO shares: 67.9% invested, 2.04x nominal
+leverage, and a third of the account sitting in cash earning nothing.
+Walking the account (cash + position, no intra-trade rebalance) rather
+than assuming full investment:
+
+    2008-2026                CAGR    maxDD
+    buy & hold index        9.41%    53.3%
+    3USL 3x, 2 shares       9.10%    32.3%
+    3USL 3x, fully in      12.33%    44.2%
+
+    2015-2026                CAGR    maxDD
+    buy & hold index       12.04%    33.9%
+    3USL 3x, 2 shares       9.53%    32.3%
+    3USL 3x, fully in      13.05%    44.2%
+
+At this size the quantised version LOSES to buy-and-hold in both
+windows. The leverage only pays when it is actually deployed, and the
+share price is a third of the account. Whole-share granularity needs
+~$1,900 (10 shares, 91.7% invested, 2.75x) before it stops dominating
+the result.
+
+XS2D on LSEETF (Xtrackers S&P 500 2x Leveraged Daily Swap, a real UCITS
+ETF rather than an ETN) reports sizeIncrement 0.0001 -- fractional, so
+100% invested at exactly 2.00x, which measured 9.76%/31.6% and
+10.15%/31.6% over those windows. Better than the quantised 3x and still
+short of the index post-2015. `shares_for` floors to whole shares, so
+using it needs fractional sizing added first.
 
 FX IS NOT HANDLED, DELIBERATELY
 -------------------------------
@@ -106,9 +136,13 @@ DEFAULT_RULES = {
     "signal_exchange": "SMART",
     "signal_currency": "USD",
     "signal_primary_exchange": "ARCA",
-    # The 3x S&P 500 ETP actually traded. VERIFY THIS QUALIFIES FIRST.
+    # The 3x S&P 500 ETP actually traded. Resolved against a live TWS on
+    # 2026-09-09: WisdomTree S&P 500 3x Daily Leveraged, conId 118833789,
+    # $183.32. The venue is LSEETF, NOT 'LSE' -- 'LSE' returns no security
+    # definition. It is an ETN (issuer credit risk), and IBKR reports
+    # sizeIncrement 1.0, so WHOLE SHARES ONLY. See the sizing note below.
     "trade_symbol": "3USL",
-    "trade_exchange": "LSE",
+    "trade_exchange": "LSEETF",
     "trade_currency": "USD",
     "trade_primary_exchange": "",
     "trade_leverage": 3,
