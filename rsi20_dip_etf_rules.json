@@ -1,0 +1,22 @@
+{
+  "signal_symbol": "SPY",
+  "signal_exchange": "SMART",
+  "signal_currency": "USD",
+  "signal_primary_exchange": "ARCA",
+  "trade_symbol": "3USL",
+  "trade_exchange": "LSE",
+  "trade_currency": "USD",
+  "trade_primary_exchange": "",
+  "trade_leverage": 3,
+  "capital": 500.0,
+  "capital_currency": "USD",
+  "max_capital": 500.0,
+  "position_fraction": 1.0,
+  "sizing_buffer": 0.97,
+  "max_shares": 100,
+  "rsi_period": 20,
+  "ma_period": 200,
+  "offset_bars": 3,
+  "entry_level": 60,
+  "exit_level": 65
+}
