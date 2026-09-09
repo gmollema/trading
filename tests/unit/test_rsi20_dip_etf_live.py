@@ -108,21 +108,33 @@ class TestLoadRules(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     etf.load_rules(path)
 
-    def test_bad_size_increment_is_rejected(self):
-        for bad in (0.0, -0.1, 2.0):
+    def test_a_fractional_size_increment_is_rejected(self):
+        """IBKR error 10243 refuses fractional quantities over the API,
+        whatever sizeIncrement the contract advertises. Configuring one
+        would produce rejected orders, not small positions."""
+        for bad in (0.0001, 0.5, 0.0, -0.1, 1.5):
             with TemporaryDirectory() as d:
                 path = write_rules(d, {"size_increment": bad})
-                with self.assertRaises(ValueError):
+                with self.assertRaises(ValueError) as ctx:
                     etf.load_rules(path)
+                self.assertIn("10243", str(ctx.exception))
 
-    def test_default_instrument_is_the_fractional_one(self):
-        """3USL is whole-share only and strands a quarter of the account;
-        XS2D is fractional and a UCITS ETF rather than an ETN."""
+    def test_a_lot_size_increment_is_allowed(self):
+        """Whole numbers above 1 are legitimate: some instruments trade
+        only in lots."""
+        with TemporaryDirectory() as d:
+            path = write_rules(d, {"size_increment": 10})
+            self.assertEqual(etf.load_rules(path)["size_increment"], 10)
+
+    def test_default_instrument_is_the_cheaper_whole_share_one(self):
+        """Whole shares only, so the share price relative to the capital
+        decides: 3USL at ~$188 deploys 75% of 500 for 2.26x, XS2D at
+        ~$362 deploys 72% for only 1.45x."""
         rules = etf.load_rules(Path("does-not-exist.json"))
-        self.assertEqual(rules["trade_symbol"], "XS2D")
+        self.assertEqual(rules["trade_symbol"], "3USL")
         self.assertEqual(rules["trade_exchange"], "LSEETF")
-        self.assertEqual(rules["trade_leverage"], 2)
-        self.assertEqual(rules["size_increment"], 0.0001)
+        self.assertEqual(rules["trade_leverage"], 3)
+        self.assertEqual(rules["size_increment"], 1.0)
 
     def test_max_shares_below_one_is_rejected(self):
         with TemporaryDirectory() as d:
@@ -187,8 +199,9 @@ class TestSharesForWholeShares(unittest.TestCase):
         self.assertAlmostEqual(sized["idle_pct"], 20.0)
 
     def test_the_measured_3usl_case(self):
-        """500 against a $188 whole-share ETN: 2 shares, ~25% idle, and
-        2.26x out of a configured 3x. The reason the default is XS2D."""
+        """The shipped default: 500 against a $188 whole-share ETN buys 2
+        shares, leaves ~25% idle, and takes on 2.26x of a configured 3x.
+        Still the best available, since XS2D at $362 manages only 1.45x."""
         rules = {**WHOLE, "trade_leverage": 3}
         sized = etf.shares_for(500.0, 188.15, rules)
         self.assertEqual(sized["shares"], 2)
@@ -222,47 +235,34 @@ class TestSharesForWholeShares(unittest.TestCase):
         self.assertLessEqual(sized["shares"] * 100.0 * 1.02, 500.0)
 
 
-class TestSharesForFractional(unittest.TestCase):
-    """size_increment 0.0001 -- the XS2D default. Without fractional
-    sizing a 500 account cannot buy a $357 share at all."""
+class TestSharesForLotSizes(unittest.TestCase):
+    """size_increment above 1, for an instrument that trades in lots."""
 
-    def test_a_share_price_above_the_capital_still_sizes(self):
-        sized = etf.shares_for(500.0, 357.33, RULES)
-        self.assertGreater(sized["shares"], 1.35)
-        self.assertLess(sized["shares"], 1.36)
+    def test_quantises_down_to_the_lot(self):
+        rules = {**RULES, "size_increment": 10.0}
+        # 500 * 0.97 = 485 at 12.00 -> 40.4 shares -> 40, not 40.4 or 50
+        sized = etf.shares_for(500.0, 12.0, rules)
+        self.assertEqual(sized["shares"], 40)
+        self.assertAlmostEqual(sized["notional"], 480.0)
 
-    def test_deploys_essentially_all_the_capital(self):
-        """The point of the change: idle cash becomes the deliberate
-        buffer, not a rounding accident."""
-        sized = etf.shares_for(500.0, 357.33, RULES)
-        self.assertAlmostEqual(sized["idle_pct"], 3.0, places=1)
-        self.assertAlmostEqual(etf.effective_leverage(sized, 500.0, RULES),
-                               1.94, places=2)
-
-    def test_quantises_down_to_the_increment(self):
-        sized = etf.shares_for(500.0, 357.33, RULES)
-        units = sized["shares"] / 0.0001
-        self.assertAlmostEqual(units, round(units), places=6)
+    def test_capital_below_one_lot_yields_zero(self):
+        rules = {**RULES, "size_increment": 100.0}
+        self.assertEqual(etf.shares_for(500.0, 12.0, rules)["shares"], 0)
 
     def test_never_exceeds_the_budget(self):
-        for price in (357.33, 188.15, 12.34, 1.07, 999.99):
-            sized = etf.shares_for(500.0, price, RULES)
-            self.assertLessEqual(sized["notional"], 500.0 * RULES["sizing_buffer"])
+        for increment in (1.0, 10.0, 100.0):
+            rules = {**RULES, "size_increment": increment}
+            for price in (188.15, 12.34, 1.07):
+                sized = etf.shares_for(500.0, price, rules)
+                self.assertLessEqual(sized["notional"],
+                                     500.0 * RULES["sizing_buffer"])
 
-    def test_no_float_dust_reaches_the_order(self):
-        """1.3572000000000002 shares is a rejected order, not a rounding
-        curiosity."""
-        for price in (357.33, 188.15, 3.7, 77.77):
+    def test_every_quantity_is_a_whole_number(self):
+        """A non-integer quantity is a rejected order (IBKR 10243), so no
+        price may produce one."""
+        for price in (188.15, 362.51, 3.7, 77.77, 1.03):
             shares = etf.shares_for(500.0, price, RULES)["shares"]
-            self.assertEqual(shares, round(shares, 8))
-
-    def test_capital_below_one_increment_yields_zero(self):
-        sized = etf.shares_for(0.01, 357.33, RULES)
-        self.assertEqual(sized["shares"], 0)
-
-    def test_max_shares_clamp_stays_on_the_increment_grid(self):
-        sized = etf.shares_for(5000.0, 100.0, {**RULES, "max_shares": 1})
-        self.assertEqual(sized["shares"], 1.0)
+            self.assertEqual(shares, int(shares))
 
 
 class TestEffectiveLeverage(unittest.TestCase):
@@ -274,7 +274,7 @@ class TestEffectiveLeverage(unittest.TestCase):
 
     def test_full_investment_reaches_the_configured_leverage(self):
         self.assertAlmostEqual(
-            etf.effective_leverage({"notional": 500.0}, 500.0, RULES), 2.0)
+            etf.effective_leverage({"notional": 500.0}, 500.0, RULES), 3.0)
 
     def test_zero_capital_is_zero_leverage_not_a_division_error(self):
         self.assertEqual(etf.effective_leverage({"notional": 0.0}, 0.0, RULES), 0.0)

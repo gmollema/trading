@@ -38,42 +38,58 @@ plain index, because volatility decay compounds against it. The strategy
 beats it only by being out of the market ~50% of the time, and out
 during the worst of it.
 
-WHY 2x AND NOT 3x, AT THIS ACCOUNT SIZE
----------------------------------------
-Not a view on leverage -- an order-size constraint. Both resolved
-against a live TWS on 2026-09-09:
+FRACTIONAL ORDERS ARE IMPOSSIBLE VIA THE API
+-------------------------------------------
+Checked with whatIfOrder against a live TWS on 2026-09-09. Any
+non-integer quantity, on either candidate instrument, is refused:
 
-    3USL  WisdomTree S&P 500 3x Daily Leveraged.  ETN.  ~$188.
-          IBKR sizeIncrement 1.0 -- WHOLE SHARES ONLY.
-    XS2D  Xtrackers S&P 500 2x Leveraged Daily Swap.  UCITS ETF.  ~$357.
-          IBKR sizeIncrement 0.0001 -- fractional.
+    Error 10243: Fractional-sized order cannot be placed via API.
+                 Please use desktop version to place this order.
 
-A 500 allocation buys two whole 3USL shares: 75% invested, a quarter of
-the account idle in cash, and 2.26x effective leverage rather than 3x.
-Walking the account as cash + position (no intra-trade rebalance) rather
-than assuming full investment:
+Whole quantities pass the same pre-check (only a harmless 10349 "TIF was
+set to DAY" note). This is an API-level restriction, NOT the account
+permission and NOT the contract: IBKR reports sizeIncrement 0.0001 for
+XS2D and will honour it for a human clicking in TWS desktop, but never
+for an order sent over the wire. Enabling fractional trading on the
+account does not change it.
+
+So this bot buys whole shares, and `size_increment` is validated as a
+whole number for that reason. Sizing an order at 1.3378 shares produces
+a rejection, not a small position.
+
+WHICH INSTRUMENT, GIVEN WHOLE SHARES ONLY
+-----------------------------------------
+The share price relative to the capital decides it, because whatever
+rounding leaves behind sits in cash earning nothing and dilutes the
+leverage. At 500 of capital:
+
+    XS2D  2x at $362.51 -> 1 share,  72.5% invested -> 1.45x effective
+    3USL  3x at $188.15 -> 2 shares, 75.3% invested -> 2.26x effective
+
+Walking the account as cash + position (no intra-trade rebalance):
 
     2008-2026                CAGR    maxDD      2015-2026    CAGR    maxDD
     buy & hold index        9.41%    53.3%      index       12.04%   33.9%
-    3USL 3x, 2 shares       9.10%    32.3%      3x, 2 sh     9.53%   32.3%
-    3USL 3x, fully in      12.33%    44.2%      3x, full    13.05%   44.2%
-    XS2D 2x, fractional     9.76%    31.6%      2x, frac    10.15%   31.6%
+    XS2D 2x, 1 share        7.34%    23.9%      XS2D 1 sh    7.60%   23.9%
+    3USL 3x, 2 shares       9.91%    35.2%      3USL 2 sh   10.40%   35.2%
 
-Quantised 3x LOSES to buy-and-hold in both windows: the leverage only
-pays when it is actually deployed. Fractional 2x beats it, because it
-deploys everything. Whole-share 3x stops being dominated by rounding
-somewhere around $1,900 (10 shares, 91.7% invested, 2.75x), so raising
-the capital -- not changing the instrument -- is what unlocks 3x.
+3USL wins on both windows, so it is the default: a cheaper share deploys
+more of a small account, and that matters more here than the difference
+between a 2x and a 3x fund. It is an ETN, so it carries issuer credit
+risk that XS2D (a swap-based UCITS ETF) does not -- accepted knowingly,
+because 1.45x of a 2x fund is the worse trade.
+
+Raising the capital is what improves this, not switching instrument: ten
+3USL shares is ~$1,900 at 91.7% invested and 2.75x.
 
 AND THE HONEST CAVEAT, ONCE
 ---------------------------
-Fractional 2x still returns 10.15% against the index's 12.04% over
-2015-2026, with a 31.6% drawdown against its 33.9%. Slightly less
-drawdown for two points less return. Over the full sample it is
-9.76% against 9.41% with 31.6% against 53.3%, which is the better
-trade -- but that edge leans on sitting out 2008-09. Treat this as
-roughly a coin flip against a plain index fund, not as an edge. It is
-wired because it was asked for.
+At 500 of capital the default returns 10.40% against the index's 12.04%
+over 2015-2026, with a 35.2% drawdown against its 33.9% -- less return
+AND slightly more drawdown. Over the full sample it is 9.91% against
+9.41% at 35.2% against 53.3%, which is the better trade, but that edge
+leans on sitting out 2008-09. On this data a plain index fund is the
+better bet at this size. It is wired because it was asked for.
 
 EU ACCESS: NOT UPRO
 -------------------
@@ -138,26 +154,24 @@ DEFAULT_RULES = {
     "signal_exchange": "SMART",
     "signal_currency": "USD",
     "signal_primary_exchange": "ARCA",
-    # The leveraged ETF actually traded. Resolved against a live TWS on
-    # 2026-09-09: Xtrackers S&P 500 2x Leveraged Daily Swap UCITS ETF,
-    # conId 79000389, $357.33, hours 09:00-17:50 London (so a 14:30 fill
-    # is mid-session). The venue is LSEETF, NOT 'LSE' -- 'LSE' returns no
-    # security definition.
+    # The leveraged ETP actually traded. Resolved against a live TWS on
+    # 2026-09-09: WisdomTree S&P 500 3x Daily Leveraged, conId 118833789,
+    # ~$188. The venue is LSEETF, NOT 'LSE' -- 'LSE' returns no security
+    # definition. An ETN, so it carries issuer credit risk.
     #
-    # 2x rather than 3x, deliberately: the 3x line (3USL) is an ETN that
-    # only accepts WHOLE shares at ~$188, which strands a quarter of a
-    # 500 account in cash and delivers 2.26x anyway. This one reports
-    # sizeIncrement 0.0001, so the capital is fully deployed at exactly
-    # 2.00x -- and it is a real UCITS ETF rather than unsecured issuer
-    # debt. See the measured table above.
-    "trade_symbol": "XS2D",
+    # 3x rather than the 2x XS2D because fractional orders are refused
+    # over the API (see the docstring): at whole shares a $188 price
+    # deploys 75% of a 500 account for 2.26x, while XS2D's $362 deploys
+    # 72% of it for only 1.45x.
+    "trade_symbol": "3USL",
     "trade_exchange": "LSEETF",
     "trade_currency": "USD",
     "trade_primary_exchange": "",
-    "trade_leverage": 2,
-    # IBKR's own sizeIncrement for trade_symbol. 1.0 for whole-share
-    # instruments; read it off --check rather than assuming.
-    "size_increment": 0.0001,
+    "trade_leverage": 3,
+    # Order-size granularity. Must be a WHOLE number: IBKR error 10243
+    # refuses any fractional quantity sent over the API, whatever
+    # sizeIncrement the contract advertises.
+    "size_increment": 1.0,
     # The allocation, in trade_currency. Capped by real account equity at
     # runtime, so this can safely sit inside a bigger account.
     "capital": 500.0,
@@ -213,10 +227,13 @@ def load_rules(path: Path = RULES_PATH) -> dict:
             f"sizing_buffer must be in (0, 1], got {rules['sizing_buffer']}")
     if rules["max_shares"] < 1:
         raise ValueError(f"max_shares must be >= 1, got {rules['max_shares']}")
-    if not 0 < rules["size_increment"] <= 1:
+    increment = rules["size_increment"]
+    if increment < 1 or increment != int(increment):
         raise ValueError(
-            f"size_increment must be in (0, 1], got {rules['size_increment']} -- "
-            f"it is IBKR's sizeIncrement for the contract, 1.0 for whole shares")
+            f"size_increment must be a whole number >= 1, got {increment} -- IBKR "
+            f"error 10243 refuses any fractional quantity sent over the API, "
+            f"whatever sizeIncrement the contract advertises. A lot-size "
+            f"instrument may legitimately want 10 or 100")
     if rules["trade_leverage"] < 1:
         raise ValueError(f"trade_leverage must be >= 1, got {rules['trade_leverage']}")
     if not rules["signal_symbol"] or not rules["trade_symbol"]:
@@ -281,14 +298,12 @@ def shares_for(capital: float, price: float, rules: dict) -> dict:
 
     Returns {"shares", "notional", "idle_cash", "idle_pct"}.
 
-    `size_increment` is IBKR's own `sizeIncrement` from the contract
-    details, and it is the difference between this strategy working at
-    500 and not. An ETN like 3USL reports 1.0 -- whole shares only -- so
-    a $188 share price leaves a quarter of a 500 account in cash and
-    turns a 3x fund into 2.26x. A fractional ETF like XS2D reports
-    0.0001, which deploys essentially all of it. Set it from --check's
-    output, never by assumption: ordering 1.3572 shares of something that
-    only accepts whole ones is a rejected order.
+    `size_increment` is the order granularity, and it must be a whole
+    number: IBKR error 10243 refuses fractional quantities over the API
+    regardless of the contract's advertised sizeIncrement. It stays a
+    parameter rather than a hardcoded 1 because lot-traded instruments
+    legitimately need 10 or 100, and because writing the constraint down
+    is what stops 0.0001 being tried again.
 
     The idle figure is returned rather than merely tolerated, because
     whenever the increment is coarse relative to the capital it is the
