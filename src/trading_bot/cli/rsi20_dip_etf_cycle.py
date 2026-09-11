@@ -1,45 +1,38 @@
-r"""Scheduled daily entrypoint for the RSI(20) dip strategy traded through
-a leveraged ETF (see rsi20_dip_etf_live.py).
+r"""Scheduled daily entrypoint for the RSI(20) dip strategy, traded
+directly through SPY (see rsi20_dip_etf_live.py).
 
-DROPPED 2026-09-09. HT_RSI20DipETF_DryRun IS DISABLED.
-------------------------------------------------------
-Nothing was armed and no money was committed. Re-enabling the task is
-one command, so read the verdict in rsi20_dip_etf_live.py first: at its
-best sizing this returns 12.46% against a plain index fund's 12.04%
-while carrying 42% drawdown against 34%.
+REVIVED AS AN UNLEVERAGED, FRACTIONAL SPY VARIANT
+--------------------------------------------------
+The earlier 3x, whole-share leveraged-ETP version (3USL) was dropped on
+2026-09-09: at its best achievable sizing it was a wash against a plain
+index fund while carrying materially worse drawdown. This variant
+replaces it with something much smaller and simpler: $500 configured
+capital, a 5% allocation per trade ($25 target), traded on SPY itself --
+the same instrument the signal is computed on -- at 1x, with no broker
+margin and a hard $25 position ceiling. See rsi20_dip_etf_live.py for the
+full sizing and validation rationale.
 
 Runs ONCE per trading day a few minutes before the 09:30 ET open and does
-nothing at any other time. Decides from the last COMPLETED daily bar of
-the INDEX PROXY and fills the ETP with a market order at the US open --
-the same reachable fill spec the futures variant uses, and the one
-find_rsi20_dip_trades models.
+nothing at any other time. Decides from the last COMPLETED daily bar and
+fills SPY with a market order at the US open -- the same reachable fill
+spec the futures variant uses, and the one find_rsi20_dip_trades models.
 
-WHY AN LSE-LISTED ETP STILL FILLS AT THE US OPEN
-------------------------------------------------
-09:30 ET is 14:30 London, the middle of the LSE session, so the order
-fills while the ETP's market makers are quoting against live S&P
-futures. That is the price the backtest assumes. Filling at the LSE
-08:00 open instead would be a price set six and a half hours before the
-signal's own reference market opened, which is a different strategy.
-
-DRY RUN IS THE DEFAULT. This spends real money and has never been run.
-It logs exactly what it would do and touches nothing until --arm.
-
-READ THIS BEFORE ARMING IT. Over 2015-2026 the 3x version returned
-12.96% against the index's 12.04%, with a 44% drawdown against its 34%:
-about one point of CAGR for ten points of extra drawdown. The
-full-sample win leans on being out of the market through 2008-09. See
-rsi20_dip_etf_live.py for the measured table.
+DRY RUN IS THE DEFAULT. It logs exactly what it would do and touches
+nothing until --arm.
 
 VERIFY THE INSTRUMENT FIRST:
     python -m trading_bot.cli.rsi20_dip_etf_cycle --check
 
---check resolves both contracts, reads account equity, prices the ETP off
-its last completed daily bar and prints the share count, the idle cash
-and the effective leverage -- without evaluating the signal or placing
-anything. Run it before anything else: the default trade_symbol is a
-UCITS 3x S&P listing that your account may not have permissions for, and
-leveraged ETPs generally need a broker appropriateness test.
+--check resolves the contract, reads account equity, prices SPY off its
+last completed daily bar and prints the share count, the idle cash and
+the effective exposure (notional / capital -- this variant is
+unleveraged, so there is no configured multiple to compare it against)
+-- without evaluating the signal or placing anything. Run it before
+anything else: sizing depends on whether your IBKR account and routing
+permit fractional SPY orders over the API. Confirm with whatIfOrder
+before relying on that in --arm; the old 3USL-era claim that the API
+refuses every fractional order (error 10243) is NOT assumed to hold for
+SPY.
 
     python -m trading_bot.cli.rsi20_dip_etf_cycle                  # dry run
     python -m trading_bot.cli.rsi20_dip_etf_cycle --ignore-window  # dry run, any time
@@ -49,9 +42,11 @@ Paper vs live is the PORT, as elsewhere in this repo: IBKR_PORT=7497 is
 paper TWS (the default), 7496 is live.
 
 DO NOT RUN THIS AND THE FUTURES VARIANT ON THE SAME EXPOSURE. They are
-different instruments so IBKR will not net them, which is worse, not
-better: you would hold a leveraged ETF position AND $38,800 of index in
-MES, with each state file claiming to be the whole position.
+different instruments so IBKR will not net them: you would hold a SPY
+position AND a MES futures position, each state file independently
+claiming to track the same signal. The SPY side is capped at $25, so the
+money at risk from double-booking is small, but the bookkeeping
+confusion is not worth having regardless.
 
 THE SCHEDULED TASK
 ------------------
@@ -165,7 +160,7 @@ def fetch_daily_bars(ib, contract) -> dict:
 
 
 def last_completed_close(bars: dict, now_et: datetime) -> float:
-    """The ETP's most recent completed daily close, used to size the order.
+    """SPY's most recent completed daily close, used to size the order.
 
     A bar close, not a live quote: IBKRClient asks for delayed market
     data, and this repo has already been bitten by treating a delayed
@@ -178,7 +173,7 @@ def last_completed_close(bars: dict, now_et: datetime) -> float:
     """
     completed = etf.completed_bars(bars, now_et)
     if not completed["close"]:
-        raise RuntimeError("no completed daily bar for the traded ETP -- cannot size")
+        raise RuntimeError("no completed daily bar for the traded instrument -- cannot size")
     return float(completed["close"][-1])
 
 
@@ -310,10 +305,9 @@ def main(argv=None) -> int:
 
         signal_contract, trade_contract = resolve_contracts(ibkr, rules)
 
-        # The signal is computed on the INDEX PROXY. Getting this wrong --
-        # feeding the ETP's own bars to decide() -- would not error, it
-        # would quietly evaluate the fitted 60/65 levels against a series
-        # whose daily moves are three times as large.
+        # signal_contract and trade_contract are the same instrument in
+        # this variant (SPY), unlike the retired leveraged-ETP version
+        # where the signal had to come from a separate index proxy.
         signal_bars = etf.completed_bars(
             fetch_daily_bars(ibkr.ib, signal_contract), now_et)
 
