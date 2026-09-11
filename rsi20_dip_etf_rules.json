@@ -22,8 +22,8 @@
   "max_shares": 100,
 
   "rsi_period": 20,
-  "ma_period": 20,
-  "offset_bars": 1,
+  "ma_period": 200,
+  "offset_bars": 3,
   "entry_level": 60,
   "exit_level": 65
 }
