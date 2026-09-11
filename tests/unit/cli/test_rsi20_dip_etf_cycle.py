@@ -6,10 +6,16 @@ survives a fully green suite -- that happened to rsi2_cycle on
 2026-09-05 and only surfaced when the scheduled task failed.
 
 The end-to-end tests drive main() against a fake broker rather than TWS.
-What they pin down is the part that is specific to this variant and not
-covered by the futures cycle's tests: that the signal is read from the
-SIGNAL contract while orders go to the TRADE contract, and that an exit
-sells the share count actually held.
+
+This variant now trades the SAME instrument (SPY) it signals off, at 1x,
+with a hard $25 position ceiling -- a rewrite from the retired 3x,
+whole-share 3USL version. Because signal_symbol == trade_symbol, there is
+only one bars series per scenario; the price used to size an order is
+whatever the signal series' last close happens to be. `rising_then_dipping_at`
+/ `rising_then_recovering_at` below apply a constant additive shift to the
+pinned crossing patterns from the signal tests so a scenario can still pick
+a convenient round price -- a uniform shift changes no RSI or SMA
+comparison, since both the closes and their moving average shift together.
 """
 
 import json
@@ -56,6 +62,23 @@ def rising_then_recovering():
     for _ in range(4):
         c.append(c[-1] + 4.0)
     return c
+
+
+def shifted_to(closes, target_last_close):
+    """Translate a close series by a constant so it ends at
+    target_last_close, leaving every bar-to-bar move -- and therefore
+    RSI and the trend filter -- unchanged. Lets a test pick a convenient
+    absolute price without hand-tuning a whole new crossing pattern."""
+    shift = target_last_close - closes[-1]
+    return [c + shift for c in closes]
+
+
+def rising_then_dipping_at(target_last_close):
+    return shifted_to(rising_then_dipping(), target_last_close)
+
+
+def rising_then_recovering_at(target_last_close):
+    return shifted_to(rising_then_recovering(), target_last_close)
 
 
 class _Contract:
@@ -233,7 +256,7 @@ class TestLogEvent(unittest.TestCase):
 
 class TestRecordFill(unittest.TestCase):
     def test_row_shape_matches_the_csv_header(self):
-        row = cycle.record_fill(_Trade(42.5), _Contract("3USL", "LSEETF"),
+        row = cycle.record_fill(_Trade(42.5), _Contract("SPY", "SMART"),
                                 "BUY", 2, "rsi_dip", "2026-09-04")
         from trading_bot import rsi2_live
         self.assertEqual(set(row), set(rsi2_live.TRADES_CSV_HEADER))
@@ -241,7 +264,7 @@ class TestRecordFill(unittest.TestCase):
         self.assertEqual(row["fill_price"], 42.5)
 
     def test_unfilled_order_records_zero_rather_than_guessing(self):
-        row = cycle.record_fill(_Trade(0.0), _Contract("3USL", "LSEETF"),
+        row = cycle.record_fill(_Trade(0.0), _Contract("SPY", "SMART"),
                                 "BUY", 2, "rsi_dip", "2026-09-04")
         self.assertEqual(row["fill_price"], 0.0)
 
@@ -263,8 +286,7 @@ class TestOutsideWindowShortCircuits(unittest.TestCase):
     def test_check_ignores_the_window(self):
         """--check is a manual diagnostic; refusing to run it out of
         hours would make it useless."""
-        bars = {"SPY": make_bars(rising_then_dipping()),
-                "3USL": make_bars([40.0 + 0.1 * k for k in range(300)])}
+        bars = {"SPY": make_bars(rising_then_dipping_at(40.0))}
         broker = FakeBroker(bars)
         with CycleHarness(broker) as h:
             with patch.object(cycle.etf, "in_decision_window", return_value=False):
@@ -281,31 +303,26 @@ class TestBadRulesStopTheCycle(unittest.TestCase):
         self.assertEqual(broker.orders, [])
 
 
-class TestSignalComesFromTheIndexNotTheETP(unittest.TestCase):
-    def test_decision_reads_the_signal_contract(self):
-        """The load-bearing test for this variant. If the ETP's own bars
-        were fed to decide(), the fitted 60/65 levels would be evaluated
-        against a series with 3x the daily range -- and nothing would
-        error."""
-        # The ETP series rises monotonically, so on its own bars RSI
-        # would sit near 100 and never cross down through 60. Only the
-        # SPY series produces a buy.
-        bars = {"SPY": make_bars(rising_then_dipping()),
-                "3USL": make_bars([40.0 + 0.1 * k for k in range(300)])}
+class TestSignalAndTradeAreTheSameInstrument(unittest.TestCase):
+    def test_decision_reads_and_trades_spy(self):
+        """Unlike the retired leveraged-ETP version -- where the signal
+        had to come from the index proxy while orders went to a
+        different, leveraged instrument -- this variant trades exactly
+        what it signals off."""
+        bars = {"SPY": make_bars(rising_then_dipping_at(40.0))}
         broker = FakeBroker(bars)
         with CycleHarness(broker) as h:
             self.assertEqual(cycle.main(["--ignore-window"]), 0)
             decision = h.event("decision")
         self.assertEqual(decision["action"], "buy")
         self.assertEqual(decision["signal_symbol"], "SPY")
-        self.assertEqual(decision["trade_symbol"], "3USL")
+        self.assertEqual(decision["trade_symbol"], "SPY")
         self.assertIn("SPY", broker.ib.history_requests)
 
 
 class TestDryRunPlacesNothing(unittest.TestCase):
     def test_a_buy_signal_without_arm_sends_no_order(self):
-        bars = {"SPY": make_bars(rising_then_dipping()),
-                "3USL": make_bars([40.0 + 0.1 * k for k in range(300)])}
+        bars = {"SPY": make_bars(rising_then_dipping_at(40.0))}
         broker = FakeBroker(bars)
         with CycleHarness(broker) as h:
             self.assertEqual(cycle.main(["--ignore-window"]), 0)
@@ -315,31 +332,30 @@ class TestDryRunPlacesNothing(unittest.TestCase):
 
 
 class TestArmedBuy(unittest.TestCase):
-    """Whole shares, which is all the API permits (IBKR error 10243)."""
+    """$500 configured capital, 5% allocation, $25 hard ceiling,
+    fractional SPY -- the rewrite from whole-share 3USL sizing."""
 
-    def _run(self, equity=(500.0, "USD"), etp_price=40.0):
-        etp = make_bars([etp_price] * 300)
-        bars = {"SPY": make_bars(rising_then_dipping()), "3USL": etp}
-        broker = FakeBroker(bars, equity=equity, fill_price=etp_price)
+    def _run(self, equity=(500.0, "USD"), price=100.0):
+        bars = {"SPY": make_bars(rising_then_dipping_at(price))}
+        broker = FakeBroker(bars, equity=equity, fill_price=price)
         return broker, CycleHarness(broker, {})
 
-    def test_places_a_buy_on_the_trade_contract_and_saves_the_position(self):
+    def test_places_a_buy_on_spy_and_saves_the_position(self):
         broker, harness = self._run()
         with harness as h:
             self.assertEqual(cycle.main(["--ignore-window", "--arm"]), 0)
             saved = json.loads(h.positions_path.read_text(encoding="utf-8"))
         self.assertEqual(len(broker.orders), 1)
         order = broker.orders[0]
-        self.assertEqual(order["symbol"], "3USL")
+        self.assertEqual(order["symbol"], "SPY")
         self.assertEqual(order["side"], "BUY")
-        # 500 * 0.97 = 485 at 40.00 -> 12 shares
-        self.assertEqual(order["quantity"], 12)
-        self.assertEqual(saved[0]["shares"], 12)
-        self.assertEqual(saved[0]["symbol"], "3USL")
+        # allocation = 500 * 0.05 = 25; budget = min(25, 25) * 0.97 = 24.25;
+        # at 100.00 that divides evenly -> 0.2425 shares, no flooring loss.
+        self.assertAlmostEqual(order["quantity"], 0.2425)
+        self.assertAlmostEqual(saved[0]["shares"], 0.2425)
+        self.assertEqual(saved[0]["symbol"], "SPY")
 
     def test_order_does_not_go_outside_regular_hours(self):
-        """A leveraged ETP's spread outside its home session is wider
-        than the edge this strategy collects."""
         broker, harness = self._run()
         with harness:
             cycle.main(["--ignore-window", "--arm"])
@@ -349,56 +365,63 @@ class TestArmedBuy(unittest.TestCase):
         broker, harness = self._run(equity=(200.0, "USD"))
         with harness:
             cycle.main(["--ignore-window", "--arm"])
-        # 200 * 0.97 = 194 at 40.00 -> 4 shares, not 12
-        self.assertEqual(broker.orders[0]["quantity"], 4)
+        # allocation = min(25, 200*0.05=10) = 10; budget = min(10, 25)*0.97
+        # = 9.7; at 100.00 -> 0.097 shares, not 0.2425.
+        self.assertAlmostEqual(broker.orders[0]["quantity"], 0.097)
 
     def test_logs_the_effective_leverage_after_rounding(self):
         broker, harness = self._run()
         with harness as h:
             cycle.main(["--ignore-window", "--arm"])
             decision = h.event("decision")
-        # 12 x 40 = 480 of 500 invested in a 3x fund = 2.88x, not 3x.
-        # Logged so the record says what was actually taken on, rather
-        # than what the config asked for.
-        self.assertAlmostEqual(decision["effective_leverage"], 2.88, places=2)
-        self.assertAlmostEqual(decision["idle_pct"], 4.0, places=1)
+        # 24.25 of 25.00 allocated capital invested = 0.97 -- the sizing
+        # buffer itself, since 100.00 divides the budget evenly. This is
+        # notional / capital now, not a multiple of a configured leverage
+        # (trade_leverage is forced to 1 for this variant).
+        self.assertAlmostEqual(decision["effective_leverage"], 0.97, places=2)
+        self.assertAlmostEqual(decision["idle_pct"], 3.0, places=1)
 
-    def test_an_unaffordable_share_price_skips_the_buy(self):
-        """With a whole-share increment, a share dearer than the account
-        is unbuyable -- the case that motivated the fractional default."""
-        broker, harness = self._run(etp_price=900.0)
+    def test_an_unaffordable_price_skips_the_buy(self):
+        """Even fractional sizing has a floor: a price so high that the
+        budget cannot afford even one size_increment still skips the buy,
+        the fractional-era equivalent of the old whole-share case."""
+        broker, harness = self._run(price=5_000_000.0)
         with harness as h:
             self.assertEqual(cycle.main(["--ignore-window", "--arm"]), 0)
             self.assertIsNotNone(h.event("buy_skipped_unfundable"))
         self.assertEqual(broker.orders, [])
 
 
-class TestFractionalIsRefusedAtConfigTime(unittest.TestCase):
-    """The bot must not be configurable into placing an order IBKR will
-    reject: error 10243 refuses any fractional quantity over the API."""
+class TestFractionalOrdersAreNowAccepted(unittest.TestCase):
+    """The retired 3USL version could never place a fractional order
+    (IBKR error 10243) and validated that at config time. This variant is
+    built around fractional SPY -- the placed quantity is expected to be
+    a non-integer, not rejected as one."""
 
-    def test_a_fractional_increment_stops_the_cycle_before_connecting(self):
+    def test_the_placed_quantity_is_fractional(self):
+        broker, harness = TestArmedBuy()._run()
+        with harness:
+            cycle.main(["--ignore-window", "--arm"])
+        qty = broker.orders[0]["quantity"]
+        self.assertNotEqual(qty, int(qty))
+
+
+class TestLeverageIsRefusedAtConfigTime(unittest.TestCase):
+    """The bot is intentionally unleveraged; a config asking for broker
+    leverage must be caught before connecting, not silently traded at 1x
+    anyway."""
+
+    def test_a_leveraged_config_stops_the_cycle_before_connecting(self):
         broker = FakeBroker({})
-        with CycleHarness(broker, {"size_increment": 0.0001}) as h:
+        with CycleHarness(broker, {"trade_leverage": 3}) as h:
             self.assertEqual(cycle.main(["--ignore-window", "--arm"]), 1)
-            self.assertIn("10243", h.event("bad_rules")["error"])
+            self.assertIn("exactly 1", h.event("bad_rules")["error"])
         self.assertEqual(broker.orders, [])
-
-    def test_every_placed_quantity_is_a_whole_number(self):
-        for price in (40.0, 188.15, 7.77):
-            etp = make_bars([price] * 300)
-            bars = {"SPY": make_bars(rising_then_dipping()), "3USL": etp}
-            broker = FakeBroker(bars, fill_price=price)
-            with CycleHarness(broker, {}):
-                cycle.main(["--ignore-window", "--arm"])
-            qty = broker.orders[0]["quantity"]
-            self.assertEqual(qty, int(qty), f"fractional quantity at price {price}")
 
 
 class TestArmedSell(unittest.TestCase):
     def _bars(self):
-        return {"SPY": make_bars(rising_then_recovering()),
-                "3USL": make_bars([40.0] * 300)}
+        return {"SPY": make_bars(rising_then_recovering_at(40.0))}
 
     def test_sells_the_share_count_held_not_a_freshly_sized_one(self):
         """The price has moved since entry; re-sizing the exit would
@@ -406,7 +429,7 @@ class TestArmedSell(unittest.TestCase):
         broker = FakeBroker(self._bars(), fill_price=40.0)
         with CycleHarness(broker) as h:
             h.positions_path.write_text(json.dumps([{
-                "symbol": "3USL", "local_symbol": "3USL", "shares": 7,
+                "symbol": "SPY", "local_symbol": "SPY", "shares": 0.07,
                 "entry_price": 38.0, "entry_date": "2026-01-01T09:30:00-05:00",
                 "entry_reason": "rsi_dip", "signal_bar_date": "2025-12-31",
             }]), encoding="utf-8")
@@ -414,17 +437,16 @@ class TestArmedSell(unittest.TestCase):
             remaining = json.loads(h.positions_path.read_text(encoding="utf-8"))
         self.assertEqual(len(broker.orders), 1)
         self.assertEqual(broker.orders[0]["side"], "SELL")
-        self.assertEqual(broker.orders[0]["quantity"], 7)
+        self.assertAlmostEqual(broker.orders[0]["quantity"], 0.07)
         self.assertEqual(remaining, [])
 
     def test_a_fractional_holding_is_sold_in_full(self):
-        """No new position can be fractional, but a state file written by
-        hand or by an older build might be. int() on the held size would
-        floor 1.3572 to 1 and leave a residue the file calls closed."""
+        """int() on the held size would floor 1.3572 to 1 and leave a
+        residue the file calls closed."""
         broker = FakeBroker(self._bars(), fill_price=40.0)
         with CycleHarness(broker) as h:
             h.positions_path.write_text(json.dumps([{
-                "symbol": "3USL", "local_symbol": "3USL", "shares": 1.3572,
+                "symbol": "SPY", "local_symbol": "SPY", "shares": 1.3572,
                 "entry_price": 357.33, "entry_date": "2026-01-01T09:30:00-05:00",
                 "entry_reason": "rsi_dip", "signal_bar_date": "2025-12-31",
             }]), encoding="utf-8")
@@ -439,8 +461,8 @@ class TestArmedSell(unittest.TestCase):
         broker = FakeBroker(self._bars())
         with CycleHarness(broker) as h:
             h.positions_path.write_text(
-                json.dumps([{"symbol": "3USL", "shares": 1},
-                            {"symbol": "3USL", "shares": 2}]), encoding="utf-8")
+                json.dumps([{"symbol": "SPY", "shares": 1},
+                            {"symbol": "SPY", "shares": 2}]), encoding="utf-8")
             self.assertEqual(cycle.main(["--ignore-window", "--arm"]), 1)
             self.assertIsNotNone(h.event("unexpected_multiple_positions"))
         self.assertEqual(broker.orders, [])
@@ -449,7 +471,7 @@ class TestArmedSell(unittest.TestCase):
 class TestHold(unittest.TestCase):
     def test_no_signal_writes_a_heartbeat_and_no_order(self):
         flat = make_bars([100.0 + 0.01 * k for k in range(300)])
-        bars = {"SPY": flat, "3USL": make_bars([40.0] * 300)}
+        bars = {"SPY": flat}
         broker = FakeBroker(bars)
         with CycleHarness(broker) as h:
             self.assertEqual(cycle.main(["--ignore-window", "--arm"]), 0)
@@ -474,14 +496,15 @@ class TestEquityIsSoftFailed(unittest.TestCase):
     def test_a_summary_error_still_trades_the_allocation(self):
         """Equity is a cap, not the sizing input, so a summary hiccup
         must not skip a trading day."""
-        etp = make_bars([40.0] * 300)
-        bars = {"SPY": make_bars(rising_then_dipping()), "3USL": etp}
-        broker = FakeBroker(bars, fill_price=40.0)
+        bars = {"SPY": make_bars(rising_then_dipping_at(100.0))}
+        broker = FakeBroker(bars, fill_price=100.0)
         broker.net_liquidation = lambda: (_ for _ in ()).throw(RuntimeError("no summary"))
         with CycleHarness(broker) as h:
             self.assertEqual(cycle.main(["--ignore-window", "--arm"]), 0)
             self.assertIsNotNone(h.event("equity_unavailable"))
-        self.assertEqual(broker.orders[0]["quantity"], 12)
+        # equity_unavailable falls back to the full $25 allocation, same
+        # as the default-equity case: 0.2425 shares at 100.00.
+        self.assertAlmostEqual(broker.orders[0]["quantity"], 0.2425)
 
 
 if __name__ == "__main__":

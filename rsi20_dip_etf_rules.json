@@ -3,21 +3,27 @@
   "signal_exchange": "SMART",
   "signal_currency": "USD",
   "signal_primary_exchange": "ARCA",
-  "trade_symbol": "3USL",
-  "trade_exchange": "LSEETF",
+
+  "trade_symbol": "SPY",
+  "trade_exchange": "SMART",
   "trade_currency": "USD",
-  "trade_primary_exchange": "",
-  "trade_leverage": 3,
-  "size_increment": 1.0,
+  "trade_primary_exchange": "ARCA",
+
+  "trade_leverage": 1,
+  "size_increment": 0.0001,
+
   "capital": 500.0,
   "capital_currency": "USD",
   "max_capital": 500.0,
-  "position_fraction": 1.0,
+
+  "position_fraction": 0.05,
   "sizing_buffer": 0.97,
+  "max_position_value": 25.0,
   "max_shares": 100,
+
   "rsi_period": 20,
-  "ma_period": 200,
-  "offset_bars": 3,
+  "ma_period": 20,
+  "offset_bars": 1,
   "entry_level": 60,
   "exit_level": 65
 }
