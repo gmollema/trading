@@ -64,17 +64,43 @@ class TestCommission(unittest.TestCase):
 
 
 class TestFractionalCommission(unittest.TestCase):
-    def test_pct_of_notional_binds_above_minimum(self):
-        # 10 shares @ $50 = $500 notional; 1% = $5.00, above the $0.01 min.
-        self.assertAlmostEqual(portfolio.fractional_commission(10, 50.0, 0.01, 0.01), 5.0)
+    """The 1% term is IBKR's per-order MAXIMUM, not a rate. Which of the
+    three terms binds depends entirely on the size of the fill."""
 
-    def test_minimum_binds_for_tiny_fractional_fills(self):
-        # 0.02 shares @ $10 = $0.20 notional; 1% = $0.002, below the $0.01 min.
-        self.assertAlmostEqual(portfolio.fractional_commission(0.02, 10.0, 0.01, 0.01), 0.01)
+    def test_the_one_percent_cap_binds_on_small_notional(self):
+        # 0.05 shares @ $500 = $25 notional. The $0.35 order minimum
+        # would apply, but 1% = $0.25 is lower, so the cap binds -- this
+        # is the case the cap exists for, and the reason a $25 position
+        # pays a full 1% per leg.
+        self.assertAlmostEqual(portfolio.fractional_commission(0.05, 500.0), 0.25)
 
-    def test_defaults_match_ibkr_published_fractional_schedule(self):
-        self.assertAlmostEqual(portfolio.fractional_commission(10, 50.0), 5.0)
+    def test_the_order_minimum_binds_above_the_cap_crossover(self):
+        # 0.2 shares @ $500 = $100 notional; 1% = $1.00, above the $0.35
+        # minimum, so the flat minimum binds and starts diluting.
+        self.assertAlmostEqual(portfolio.fractional_commission(0.2, 500.0), 0.35)
+
+    def test_the_per_share_rate_binds_on_large_fills(self):
+        # 1000 shares @ $50: per-share = $3.50, above the $0.35 minimum
+        # and far below the 1% cap of $500.
+        self.assertAlmostEqual(portfolio.fractional_commission(1000, 50.0), 3.5)
+
+    def test_a_500_dollar_fill_costs_the_tiered_minimum_not_one_percent(self):
+        """The regression this function was corrected for: 1% as a floor
+        billed $5.00 here, against IBKR's actual $0.35."""
+        self.assertAlmostEqual(portfolio.fractional_commission(10, 50.0), 0.35)
+
+    def test_absolute_minimum_floors_a_dust_fill(self):
+        # 0.001 shares @ $10 = $0.01 notional; the 1% cap is $0.0001,
+        # below the $0.01 absolute floor.
         self.assertAlmostEqual(portfolio.fractional_commission(0.001, 10.0), 0.01)
+
+    def test_fixed_plan_cap_binds_much_further_up(self):
+        """On Fixed ($1.00 minimum) the 1% cap binds all the way to $100
+        of notional, so a small fill is billed a full 1%."""
+        self.assertAlmostEqual(
+            portfolio.fractional_commission(0.2, 500.0, per_share=0.005,
+                                            order_minimum=1.00),
+            1.0)
 
 
 class TestFxCommission(unittest.TestCase):

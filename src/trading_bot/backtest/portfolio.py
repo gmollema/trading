@@ -48,6 +48,14 @@ def commission(qty: float, per_share: float = DEFAULT_COMMISSION_PER_SHARE, mini
     return max(qty * per_share, minimum)
 
 
+# The 1% is IBKR's per-order MAXIMUM, not a rate. Corrected 2026-09-11:
+# this module previously modelled it as `max(1% of notional, $0.01)`,
+# i.e. 1% as a FLOOR, which overcharges every fill above ~$35 of notional
+# -- a 10-share $500 fill came out at $5.00 against a real $0.35, 14x
+# high. The cap exists to PROTECT small orders from the flat per-order
+# minimum, so reading it as a floor inverts exactly the case it was
+# written for, and made small-account backtests look unviable when the
+# binding cost was an artefact.
 DEFAULT_FRACTIONAL_COMMISSION_PCT = 0.01
 DEFAULT_FRACTIONAL_COMMISSION_MIN = 0.01
 
@@ -57,14 +65,33 @@ def fractional_commission(
     price: float,
     pct_of_notional: float = DEFAULT_FRACTIONAL_COMMISSION_PCT,
     minimum: float = DEFAULT_FRACTIONAL_COMMISSION_MIN,
+    per_share: float = TIERED_COMMISSION_PER_SHARE,
+    order_minimum: float = TIERED_COMMISSION_MIN,
 ) -> float:
-    """IBKR's ACTUAL published fractional-share commission schedule --
-    confirmed via IBKR's own commissions pages (2026-04): the greater of
-    1% of trade value or $0.01 per fill. This is a completely different
-    structure from the whole-share per-share/flat-minimum schedule above
-    (which is what `commission()` models) -- fractional fills are NOT
-    just "the per-share rate applied to a non-integer qty"."""
-    return max(qty * price * pct_of_notional, minimum)
+    """IBKR's US-stock commission as it applies to a fractional fill:
+
+        min( max(qty * per_share, order_minimum), pct_of_notional * notional )
+
+    Fractional fills go through the SAME per-share schedule as whole
+    shares (hence the shared defaults with `commission()`, Tiered here);
+    what makes them different is that the 1% per-order maximum actually
+    binds, because the flat minimum would otherwise dwarf a small fill.
+
+    Which term binds, on Tiered ($0.0035/share, $0.35 min, 1% max):
+        below ~$35 of notional -> the 1% CAP binds, so cost is 1% flat
+        above ~$35            -> the $0.35 minimum binds, and dilutes
+        above ~$100/share qty -> the per-share rate binds
+
+    `minimum` is the absolute floor per fill and is nearly always
+    dominated by the other two terms; it is kept so a caller can model a
+    schedule that bills some token amount on a dust fill.
+
+    Pass per_share/order_minimum to model the Fixed plan ($0.005/share,
+    $1.00 minimum) instead -- on Fixed the 1% cap binds all the way up to
+    $100 of notional, which is a materially worse deal for small fills."""
+    scheduled = max(qty * per_share, order_minimum)
+    capped = min(scheduled, qty * price * pct_of_notional)
+    return max(capped, minimum)
 
 
 # IBKR IDEALPRO forex commission, Tier I (retail; applies up to $1B of

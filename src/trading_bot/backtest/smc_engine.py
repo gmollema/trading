@@ -349,14 +349,21 @@ def simulate_smc_portfolio(
         shrinks the effective tradeable universe AND makes the handful
         of positions that DO execute tiny enough that a flat per-order
         commission minimum dominates their economics. When True, fills
-        are costed via fractional_commission_pct/_min (IBKR's ACTUAL
-        published fractional-share schedule -- 1% of trade value, $0.01
-        minimum -- confirmed against IBKR's own commissions pages,
-        2026-04) instead of commission_per_share/commission_min, since
-        real fractional fills are billed completely differently, not
-        just "the per-share rate applied to a non-integer qty". Needs
-        real broker support to ever go live: IBKR does offer fractional
-        shares, but this codebase's own order-placement path
+        are costed via portfolio.fractional_commission instead of
+        commission_per_share/commission_min.
+
+        NOTE (2026-09-11): that function was corrected. It previously
+        modelled IBKR's 1% term as a FLOOR, when it is a per-order
+        MAXIMUM -- a cap that protects small orders from the flat
+        minimum. The old model billed a $500 fractional fill $5.00
+        against a real $0.35. Any fractional-mode result produced before
+        that date overstates costs, so the "small accounts are unviable"
+        conclusion recorded elsewhere in this repo needs re-measuring
+        rather than trusting. Verify against whatIfOrder before relying
+        on either reading.
+
+        Needs real broker support to ever go live: IBKR does offer
+        fractional shares, but this codebase's own order-placement path
         (broker/ibkr_client.py) is whole-shares-only today -- this flag
         only affects the backtest.
     """
