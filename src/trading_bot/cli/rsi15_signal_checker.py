@@ -13,17 +13,21 @@ Output: Logs signals to rsi15_signals.log + console
 
 import sys
 from datetime import datetime
-import yfinance as yf
-import pandas as pd
 from pathlib import Path
 
+try:
+    import yfinance as yf
+except ImportError:
+    print("ERROR: yfinance not installed. Install with: pip install yfinance")
+    sys.exit(1)
 
-def wilder_rsi(closes: list[float], period: int) -> list[float | None]:
+
+def wilder_rsi(closes: list[float], period: int) -> list[float]:
     """Wilder's RSI calculation (matches TradingView default)."""
     if len(closes) < period + 1:
-        return [None] * len(closes)
+        return [0.0] * len(closes)
 
-    rsi = [None] * period
+    rsi = [0.0] * period
     deltas = [closes[i] - closes[i-1] for i in range(1, len(closes))]
 
     seed_up = sum(d for d in deltas[:period] if d > 0) / period
@@ -46,19 +50,15 @@ def wilder_rsi(closes: list[float], period: int) -> list[float | None]:
     return rsi
 
 
-def get_signal(data: pd.DataFrame, verbose: bool = False) -> str:
+def get_signal(closes: list[float], verbose: bool = False) -> str:
     """Check for entry (RSI < 60) or exit (RSI > 65) signals."""
-    if len(data) < 20:
+    if len(closes) < 20:
         return "INSUFFICIENT_DATA"
 
-    closes = data['Close'].tolist()
     rsi_values = wilder_rsi(closes, period=15)
 
-    prev_rsi = rsi_values[-2] if len(rsi_values) > 1 and rsi_values[-2] else None
-    curr_rsi = rsi_values[-1] if rsi_values[-1] else None
-
-    if prev_rsi is None or curr_rsi is None:
-        return "INSUFFICIENT_RSI_DATA"
+    prev_rsi = rsi_values[-2]
+    curr_rsi = rsi_values[-1]
 
     if verbose:
         print(f"  RSI(15): prev={prev_rsi:.2f}, curr={curr_rsi:.2f}")
@@ -88,10 +88,12 @@ def main():
                 f.write(f"[{datetime.now().isoformat()}] {msg}\n")
             return
 
-        signal = get_signal(sp500, verbose=verbose)
+        # yfinance returns multi-index DataFrame, extract the ^GSPC column
+        closes = sp500['Close']['^GSPC'].values.tolist()
+        signal = get_signal(closes, verbose=verbose)
 
-        # Latest price and RSI
-        latest_close = sp500['Close'].iloc[-1]
+        # Latest price
+        latest_close = closes[-1]
         print(f"  S&P 500: {latest_close:.2f}")
         print(f"  Signal: {signal}")
 
@@ -103,13 +105,13 @@ def main():
         if signal == "BUY":
             print("\n*** BUY SIGNAL ***")
             print("Action: BUY both VUAA and Nasdaq 100 ETF on Trading 212")
-            print("Target: 5% of capital per instrument (€25 each if €500 account)")
+            print("Target: €250 each (5% of €500 capital, or adjust to your size)")
         elif signal == "SELL":
             print("\n*** SELL SIGNAL ***")
             print("Action: SELL both VUAA and Nasdaq 100 ETF positions on Trading 212")
 
     except Exception as e:
-        msg = f"ERROR: {e}"
+        msg = f"ERROR: {type(e).__name__}: {e}"
         print(msg)
         with open(log_path, "a") as f:
             f.write(f"[{datetime.now().isoformat()}] {msg}\n")
