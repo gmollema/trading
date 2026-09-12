@@ -21,6 +21,8 @@ except ImportError:
     print("ERROR: yfinance not installed. Install with: pip install yfinance")
     sys.exit(1)
 
+from trading_bot.util.notifier import notify
+
 
 def wilder_rsi(closes: list[float], period: int) -> list[float]:
     """Wilder's RSI calculation (matches TradingView default)."""
@@ -50,10 +52,10 @@ def wilder_rsi(closes: list[float], period: int) -> list[float]:
     return rsi
 
 
-def get_signal(closes: list[float], verbose: bool = False) -> str:
-    """Check for entry (RSI < 60) or exit (RSI > 65) signals."""
+def get_signal(closes: list[float], verbose: bool = False) -> tuple[str, list[float]]:
+    """Check for entry (RSI < 60) or exit (RSI > 65) signals. Returns (signal, rsi_values)."""
     if len(closes) < 20:
-        return "INSUFFICIENT_DATA"
+        return "INSUFFICIENT_DATA", []
 
     rsi_values = wilder_rsi(closes, period=15)
 
@@ -65,11 +67,11 @@ def get_signal(closes: list[float], verbose: bool = False) -> str:
 
     # Check for crossings
     if prev_rsi > 60 and curr_rsi <= 60:
-        return "BUY"
+        return "BUY", rsi_values
     elif prev_rsi < 65 and curr_rsi >= 65:
-        return "SELL"
+        return "SELL", rsi_values
     else:
-        return "NO_SIGNAL"
+        return "NO_SIGNAL", rsi_values
 
 
 def main():
@@ -90,7 +92,7 @@ def main():
 
         # yfinance returns multi-index DataFrame, extract the ^GSPC column
         closes = sp500['Close']['^GSPC'].values.tolist()
-        signal = get_signal(closes, verbose=verbose)
+        signal, rsi_values = get_signal(closes, verbose=verbose)
 
         # Latest price
         latest_close = closes[-1]
@@ -104,11 +106,15 @@ def main():
         # Alert on actual signals
         if signal == "BUY":
             print("\n*** BUY SIGNAL ***")
-            print("Action: BUY both VUAA and Nasdaq 100 ETF on Trading 212")
+            msg = f"BUY: VUAA + Nasdaq 100 ETF\nS&P 500: {latest_close:.2f}\nRSI(15): {rsi_values[-1]:.2f}"
+            print(msg)
             print("Target: €250 each (5% of €500 capital, or adjust to your size)")
+            notify("RSI(15) BUY SIGNAL", msg, priority="high")
         elif signal == "SELL":
             print("\n*** SELL SIGNAL ***")
-            print("Action: SELL both VUAA and Nasdaq 100 ETF positions on Trading 212")
+            msg = f"SELL: VUAA + Nasdaq 100 ETF\nS&P 500: {latest_close:.2f}\nRSI(15): {rsi_values[-1]:.2f}"
+            print(msg)
+            notify("RSI(15) SELL SIGNAL", msg, priority="high")
 
     except Exception as e:
         msg = f"ERROR: {type(e).__name__}: {e}"
