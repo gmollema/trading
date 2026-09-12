@@ -1,19 +1,19 @@
 {
-  "signal_symbol": "SPY",
-  "signal_exchange": "SMART",
+  "signal_symbol": "^GSPC",
+  "signal_exchange": "INDEXSP",
   "signal_currency": "USD",
-  "signal_primary_exchange": "ARCA",
+  "signal_primary_exchange": "INDEXSP",
 
-  "trade_symbol": "SPY",
-  "trade_exchange": "SMART",
-  "trade_currency": "USD",
-  "trade_primary_exchange": "ARCA",
+  "trade_symbol": "VUAA",
+  "trade_exchange": "XETRA",
+  "trade_currency": "EUR",
+  "trade_primary_exchange": "XETRA",
 
   "trade_leverage": 1,
   "size_increment": 0.0001,
 
   "capital": 500.0,
-  "capital_currency": "USD",
+  "capital_currency": "EUR",
   "max_capital": 500.0,
 
   "position_fraction": 0.05,
@@ -21,7 +21,7 @@
   "max_position_value": 25.0,
   "max_shares": 100,
 
-  "rsi_period": 20,
+  "rsi_period": 15,
   "ma_period": 200,
   "offset_bars": 3,
   "entry_level": 60,
