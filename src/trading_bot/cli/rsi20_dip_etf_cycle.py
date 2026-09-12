@@ -1,5 +1,5 @@
-r"""Scheduled daily entrypoint for the RSI(20) dip strategy, traded
-directly through SPY (see rsi20_dip_etf_live.py).
+r"""Scheduled daily entrypoint for the RSI dip strategy, currently optimized
+to RSI(15) @ 60/65 entry/exit (see rsi20_dip_etf_live.py).
 
 REVIVED AS AN UNLEVERAGED, FRACTIONAL SPY VARIANT
 --------------------------------------------------

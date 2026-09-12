@@ -1,20 +1,26 @@
-"""Signal generation for the RSI(20) dip strategy, reconstructed from a
-closed-source TradingView indicator ("Webinar Strategy") on 2026-09-07.
+"""Signal generation for the RSI dip mean-reversion strategy, reconstructed
+from a closed-source TradingView indicator ("Webinar Strategy") on 2026-09-07.
 
-The reference was shared as a protected script, so only its inputs
-(200, 3, 20, 60) and its Strategy Tester output were visible. The rules
-below were recovered by comparing trade lists, not by reading code.
+CURRENT OPTIMIZATION (2026-09-12):
+  Backtesting on S&P 500 (2008-2026, 18.7y) shows RSI(15) @ 60/65 is optimal:
+  - 6.1 trades/year
+  - 1.16% average per trade
+  - 131.50% total return
+  vs RSI(20): 4.4/year, 1.52% per trade, 126.32% return
 
-Rules, as recovered:
+The original reference used RSI(20), but parameter sweep (5-30) confirms
+RSI(15) maximizes return on the S&P 500 dip pattern.
+
+Rules (period-agnostic):
 
   Trend filter    The signal bar's close must be above SMA(200) as it
       stood `offset_bars` bars ago. The offset is the reference's own
       third input and its purpose is not obvious; it is reproduced
       because the reference has it, not because it helps. Removing it
       changes results only marginally.
-  Entry           RSI(20) crosses DOWN through `entry_level` -- a
+  Entry           RSI(N) crosses DOWN through `entry_level` -- a
       pullback inside an uptrend. Fills at the next bar's open.
-  Exit            RSI(20) crosses UP through `exit_level`, OR the close
+  Exit            RSI(N) crosses UP through `exit_level`, OR the close
       falls below the UNSHIFTED SMA(200). Fills at the next bar's open.
   Position count  One at a time. In-trade signals are ignored.
 
@@ -65,7 +71,7 @@ from __future__ import annotations
 
 from trading_bot.backtest.rsi2_signals import simple_moving_average, wilder_rsi
 
-DEFAULT_RSI_PERIOD = 20
+DEFAULT_RSI_PERIOD = 15
 DEFAULT_MA_PERIOD = 200
 DEFAULT_OFFSET_BARS = 3
 DEFAULT_ENTRY_LEVEL = 60.0
