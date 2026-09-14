@@ -1,12 +1,17 @@
 #!/usr/bin/env python3
-"""Continuous RSI(15) signal bot. Start once, runs forever.
+"""RSI(15) Mean Reversion Strategy - Continuous signal bot. Start once, runs forever.
 
-Checks for signals once daily at a set time (default: 22:00 CET).
+Monitors S&P 500 RSI(15) and generates trading signals:
+  - BUY when RSI < 60 (oversold)
+  - SELL when RSI > 65 (overbought)
+
+Checks for signals once daily at a set time (default: 19:00 CET).
 Stays running in background, sends Telegram alerts on signals.
+Trades VUAA + Nasdaq 100 ETF (manual execution on Trading 212).
 
 Usage:
     python -m trading_bot.cli.rsi15_signal_bot
-    python -m trading_bot.cli.rsi15_signal_bot --check-time 22:00  # Custom time (HH:MM)
+    python -m trading_bot.cli.rsi15_signal_bot --check-time 19:00  # Custom time (HH:MM)
 
 Press Ctrl+C to stop.
 """
@@ -98,9 +103,10 @@ def main():
 
     log_path = Path("rsi15_signals.log")
 
-    print(f"[{datetime.now().isoformat()}] RSI(15) Signal Bot started")
+    print(f"[{datetime.now().isoformat()}] RSI(15) Mean Reversion Strategy started")
     print(f"[{datetime.now().isoformat()}] Check time: {check_time_str} CET")
     print(f"[{datetime.now().isoformat()}] Instruments: VUAA + Nasdaq 100 ETF")
+    print(f"[{datetime.now().isoformat()}] Position size: 5% (12.50€ each)")
     print(f"[{datetime.now().isoformat()}] Telegram alerts: ON")
     print(f"[{datetime.now().isoformat()}] Press Ctrl+C to stop\n")
 
@@ -125,13 +131,30 @@ def main():
 
                 # Alert on signals
                 if signal == "BUY":
-                    msg = f"BUY: VUAA + Nasdaq 100 ETF\nS&P 500: {latest_close:.2f}\nRSI(15): {rsi_values[-1]:.2f}"
-                    notify("RSI(15) BUY SIGNAL", msg, priority="high")
+                    msg = f"""🟢 BUY SIGNAL
+S&P 500 RSI(15): {rsi_values[-1]:.2f}
+
+Entry (next day 09:00-10:00 CET):
+  • VUAA: 12.50€ at market
+  • Nasdaq 100 ETF: 12.50€ at market
+
+Total Entry: 25€ (5% of account)
+Reference Price: S&P 500 {latest_close:.2f}
+
+Exit: On SELL signal"""
+                    notify("RSI(15) Mean Reversion - BUY", msg, priority="high")
                     print("*** BUY SIGNAL - Telegram alert sent ***\n")
 
                 elif signal == "SELL":
-                    msg = f"SELL: VUAA + Nasdaq 100 ETF\nS&P 500: {latest_close:.2f}\nRSI(15): {rsi_values[-1]:.2f}"
-                    notify("RSI(15) SELL SIGNAL", msg, priority="high")
+                    msg = f"""🔴 SELL SIGNAL
+S&P 500 RSI(15): {rsi_values[-1]:.2f}
+
+Exit (next day 09:00-10:00 CET):
+  • VUAA: Close position
+  • Nasdaq 100 ETF: Close position
+
+Reference Price: S&P 500 {latest_close:.2f}"""
+                    notify("RSI(15) Mean Reversion - SELL", msg, priority="high")
                     print("*** SELL SIGNAL - Telegram alert sent ***\n")
 
                 last_check_date = now.date()
