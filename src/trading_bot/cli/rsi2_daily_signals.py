@@ -22,6 +22,14 @@ from trading_bot.backtest.rsi2_signals import (
     get_optimal_sma,
 )
 
+# ANSI color codes
+GREEN = "\033[92m"
+YELLOW = "\033[93m"
+CYAN = "\033[96m"
+RED = "\033[91m"
+RESET = "\033[0m"
+BOLD = "\033[1m"
+
 SYMBOLS = {
     "^GSPC": "S&P 500 (SPY)",
     "^IXIC": "Nasdaq 100 (QQQ)",
@@ -117,23 +125,23 @@ def main():
 
         # Signal output
         if result["signal"] == "BUY":
-            print(f"\n{'='*70}")
-            print(f">>> BUY SIGNAL <<<")
-            print(f"{'='*70}")
-            print(f"RSI crossed below {result['entry_level']}")
+            print(f"\n{GREEN}{'='*70}")
+            print(f"{GREEN}{BOLD}>>> BUY SIGNAL <<<{RESET}")
+            print(f"{GREEN}{'='*70}{RESET}")
+            print(f"{GREEN}RSI crossed below {result['entry_level']}")
             print(f"Trade size: $25 on Trading 212")
-            print(f"Entry: NOW")
-            print(f"{'='*70}")
+            print(f"Entry: NOW{RESET}")
+            print(f"{GREEN}{'='*70}{RESET}")
         elif result["signal"] == "SETUP":
-            print(f"\n{'='*70}")
-            print(f">>> SETUP (WATCH) <<<")
-            print(f"{'='*70}")
-            print(f"RSI is low, waiting for cross")
-            print(f"Monitor for entry tomorrow")
-            print(f"{'='*70}")
+            print(f"\n{YELLOW}{'='*70}")
+            print(f"{YELLOW}{BOLD}>>> SETUP (WATCH) <<<{RESET}")
+            print(f"{YELLOW}{'='*70}{RESET}")
+            print(f"{YELLOW}RSI is low, waiting for cross")
+            print(f"Monitor for entry tomorrow{RESET}")
+            print(f"{YELLOW}{'='*70}{RESET}")
         else:
-            print(f"\n>>> WAIT - No signal <<<")
-            print(f"RSI not low enough or price below SMA")
+            print(f"\n{CYAN}>>> WAIT - No signal <<<{RESET}")
+            print(f"{CYAN}RSI not low enough or price below SMA{RESET}")
 
         print()
 

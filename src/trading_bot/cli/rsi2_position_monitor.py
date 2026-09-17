@@ -17,6 +17,14 @@ from pathlib import Path
 
 import yfinance as yf
 
+# ANSI color codes
+GREEN = "\033[92m"
+YELLOW = "\033[93m"
+RED = "\033[91m"
+CYAN = "\033[96m"
+RESET = "\033[0m"
+BOLD = "\033[1m"
+
 def load_trades() -> list[dict]:
     """Load open trades from trades.csv."""
     trades_file = Path("trades.csv")
@@ -114,17 +122,21 @@ def main():
 
         # Exit signal
         if result['stop_hit']:
-            print(f"\n[ACTION] **STOP HIT** - Sell immediately")
-            print(f"   Loss: ${result['pnl']:.2f}")
+            print(f"\n{RED}{'='*70}")
+            print(f"{RED}{BOLD}[ACTION] STOP HIT - SELL IMMEDIATELY{RESET}")
+            print(f"{RED}{'='*70}{RESET}")
+            print(f"{RED}Loss: ${result['pnl']:.2f}{RESET}")
         elif result['should_exit']:
-            print(f"\n[ACTION] **SELL** - 12+ days AND profitable")
-            print(f"   Profit: ${result['pnl']:.2f}")
+            print(f"\n{GREEN}{'='*70}")
+            print(f"{GREEN}{BOLD}[ACTION] SELL - 12+ DAYS AND PROFITABLE{RESET}")
+            print(f"{GREEN}{'='*70}{RESET}")
+            print(f"{GREEN}Profit: ${result['pnl']:.2f}{RESET}")
         elif result['days_held'] >= 12:
-            print(f"\n[ACTION] **HOLD** - 12+ days but not profitable yet")
-            print(f"   Current loss: ${result['pnl']:.2f}")
+            print(f"\n{YELLOW}[ACTION] HOLD - 12+ days but not profitable yet")
+            print(f"   Current loss: ${result['pnl']:.2f}{RESET}")
         else:
             days_left = 12 - result['days_held']
-            print(f"\n[ACTION] **HOLD** - {days_left} more days until exit eligible")
+            print(f"\n{CYAN}[ACTION] HOLD - {days_left} more days until exit eligible{RESET}")
 
         print()
 
