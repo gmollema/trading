@@ -59,15 +59,26 @@ DEFAULT_ENTRY_LEVEL = 10.0
 DEFAULT_EXIT_LEVEL = 70.0
 DEFAULT_SMA_PERIOD = 200
 DEFAULT_STOP_POINTS = 225.0
-# Optimal stops per symbol (empirically tested 2021-2026 period)
+DEFAULT_SMA_PERIOD = 200
+
+# Optimal parameters per symbol (empirically tested 2021-2026 period)
 SYMBOL_OPTIMAL_STOPS = {
     "^GSPC": 225.0,  # S&P 500: wider stop allows winners to run
     "^IXIC": 125.0,  # Nasdaq 100: tighter stop handles volatility
 }
 
+SYMBOL_OPTIMAL_SMA = {
+    "^GSPC": 175,  # S&P 500: shorter SMA, +7.8% vs SMA(200)
+    "^IXIC": 250,  # Nasdaq 100: longer SMA needed for volatility, +52% vs SMA(200)
+}
+
 def get_optimal_stop(symbol: str) -> float:
     """Return optimal stop for a symbol, or default if not configured."""
     return SYMBOL_OPTIMAL_STOPS.get(symbol, DEFAULT_STOP_POINTS)
+
+def get_optimal_sma(symbol: str) -> int:
+    """Return optimal SMA period for a symbol, or default if not configured."""
+    return SYMBOL_OPTIMAL_SMA.get(symbol, DEFAULT_SMA_PERIOD)
 
 # Regime filter (rsi2_regime_ok). 50 is the conventional short trend against
 # the strategy's own 200; 14 is Wilder's ATR default; 252 is one year of

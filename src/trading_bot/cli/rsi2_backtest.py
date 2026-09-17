@@ -67,6 +67,7 @@ from trading_bot.backtest.rsi2_signals import (
     wilder_atr,
     trailing_median,
     get_optimal_stop,
+    get_optimal_sma,
 )
 from trading_bot.cli.rsi2_fetch_data import DAILY_INDEX_DIR, safe_filename
 
@@ -306,13 +307,18 @@ def run_variant(bars: dict, args: argparse.Namespace, exit_mode: str = None, min
     afterwards, by entry date, rather than by slicing the bars first --
     slicing would fabricate an artificial end-of-data exit at every
     window boundary and would strip the 200 bars of SMA warmup."""
+    # Use symbol-specific optimal SMA if no explicit SMA was provided
+    sma_period = args.sma_period
+    if symbol:
+        sma_period = get_optimal_sma(symbol)
+
     if use_scale_in:
         trades = find_rsi2_scale_in_trades(
             bars,
             rsi_period=args.rsi_period,
             entry_level=args.entry_level,
             exit_level=args.exit_level,
-            sma_period=args.sma_period,
+            sma_period=sma_period,
             max_positions=args.max_positions,
             first_dip=args.first_dip,
             stop_pct=args.stop_pct,
@@ -334,7 +340,7 @@ def run_variant(bars: dict, args: argparse.Namespace, exit_mode: str = None, min
             rsi_period=args.rsi_period,
             entry_level=args.entry_level,
             exit_level=args.exit_level,
-            sma_period=args.sma_period,
+            sma_period=sma_period,
             stop_points=stop_points,
             stop_pct=args.stop_pct,
             exit_mode=exit_mode or EXIT_MODE_FIRST_PROFITABLE_CLOSE,
@@ -380,7 +386,10 @@ def main(argv=None) -> int:
         effective_stop = get_optimal_stop(args.symbol)
         stop_desc = f"{effective_stop} pts"
 
-    print(f"stop: {stop_desc}   cost per round trip: {args.cost_points} pts\n")
+    # Determine effective SMA (use symbol-specific optimal if no override)
+    effective_sma = get_optimal_sma(args.symbol)
+
+    print(f"stop: {stop_desc}   SMA: {effective_sma}   cost per round trip: {args.cost_points} pts\n")
 
     rows: list[dict] = []
     by_variant: dict[str, list[dict]] = {}
