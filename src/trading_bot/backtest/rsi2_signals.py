@@ -58,7 +58,7 @@ DEFAULT_RSI_PERIOD = 2
 DEFAULT_ENTRY_LEVEL = 10.0
 DEFAULT_EXIT_LEVEL = 70.0
 DEFAULT_SMA_PERIOD = 200
-DEFAULT_STOP_POINTS = 200.0
+DEFAULT_STOP_POINTS = 225.0
 # Regime filter (rsi2_regime_ok). 50 is the conventional short trend against
 # the strategy's own 200; 14 is Wilder's ATR default; 252 is one year of
 # trading days, so ATR is judged against its own recent normal rather than
