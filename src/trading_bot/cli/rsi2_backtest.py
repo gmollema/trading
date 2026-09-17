@@ -66,6 +66,7 @@ from trading_bot.backtest.rsi2_signals import (
     DEFAULT_ATR_MEDIAN_LOOKBACK,
     wilder_atr,
     trailing_median,
+    get_optimal_stop,
 )
 from trading_bot.cli.rsi2_fetch_data import DAILY_INDEX_DIR, safe_filename
 
@@ -300,7 +301,7 @@ def _median(values: list[float]) -> float:
 
 
 def run_variant(bars: dict, args: argparse.Namespace, exit_mode: str = None, min_hold_days: int = None,
-                exit_timing: str = None, use_scale_in: bool = False) -> list[dict]:
+                exit_timing: str = None, use_scale_in: bool = False, symbol: str = None) -> list[dict]:
     """One full walk over the whole cached series. Windowing is applied
     afterwards, by entry date, rather than by slicing the bars first --
     slicing would fabricate an artificial end-of-data exit at every
@@ -320,13 +321,21 @@ def run_variant(bars: dict, args: argparse.Namespace, exit_mode: str = None, min
             regime_filter=False,
         )
     else:
+        # Use symbol-specific optimal stop if no explicit stop was provided
+        stop_points = None
+        if not (args.no_stop or args.stop_pct is not None):
+            if symbol:
+                stop_points = get_optimal_stop(symbol)
+            else:
+                stop_points = args.stop_points
+
         trades = find_rsi2_long_trades(
             bars,
             rsi_period=args.rsi_period,
             entry_level=args.entry_level,
             exit_level=args.exit_level,
             sma_period=args.sma_period,
-            stop_points=None if (args.no_stop or args.stop_pct is not None) else args.stop_points,
+            stop_points=stop_points,
             stop_pct=args.stop_pct,
             exit_mode=exit_mode or EXIT_MODE_FIRST_PROFITABLE_CLOSE,
             min_hold_days=min_hold_days or args.min_hold_days,
@@ -359,7 +368,18 @@ def main(argv=None) -> int:
     bars = load_bars(args.symbol, Path(args.data_dir))
     print(f"{args.symbol}: {len(bars['date'])} daily bars, "
           f"{bars['date'][0].date()} .. {bars['date'][-1].date()}")
-    stop_desc = "none" if args.no_stop else (f"{args.stop_pct}%" if args.stop_pct is not None else f"{args.stop_points} pts")
+
+    # Determine effective stop (use symbol-specific optimal if no override)
+    if args.no_stop:
+        stop_desc = "none"
+        effective_stop = None
+    elif args.stop_pct is not None:
+        stop_desc = f"{args.stop_pct}%"
+        effective_stop = None
+    else:
+        effective_stop = get_optimal_stop(args.symbol)
+        stop_desc = f"{effective_stop} pts"
+
     print(f"stop: {stop_desc}   cost per round trip: {args.cost_points} pts\n")
 
     rows: list[dict] = []
@@ -368,7 +388,7 @@ def main(argv=None) -> int:
     if args.scale_in:
         print(f"Scale-in variant: max {args.max_positions} positions, first entry at dip {args.first_dip}\n")
         label = f"scale_in_dip{args.first_dip}_max{args.max_positions}"
-        all_trades = run_variant(bars, args, use_scale_in=True)
+        all_trades = run_variant(bars, args, use_scale_in=True, symbol=args.symbol)
         by_variant[label] = all_trades
         for window_name, window in WINDOWS.items():
             windowed = [t for t in all_trades if in_window(t["entry_date"], *window)]
@@ -378,7 +398,7 @@ def main(argv=None) -> int:
         print()
     else:
         for label, exit_mode, min_hold, timing in variants(args):
-            all_trades = run_variant(bars, args, exit_mode, min_hold, timing)
+            all_trades = run_variant(bars, args, exit_mode, min_hold, timing, symbol=args.symbol)
             by_variant[label] = all_trades
             for window_name, window in WINDOWS.items():
                 windowed = [t for t in all_trades if in_window(t["entry_date"], *window)]
@@ -390,13 +410,13 @@ def main(argv=None) -> int:
     dollar_rows: list[dict] = []
     if args.dollars:
         spec = resolve_spec(args)
-        risk_per_contract = (args.stop_points * spec.multiplier) if not (args.no_stop or args.stop_pct is not None) else None
+        risk_per_contract = (effective_stop * spec.multiplier) if effective_stop is not None else None
         print(f"{spec.name}: ${spec.multiplier:g}/point, ${spec.commission_per_side}/side, "
               f"${spec.margin_per_contract:g} margin (assumed)   capital ${args.initial_capital:,.0f}, "
               f"risk {args.risk_pct}%, slippage {args.slippage_ticks} tick/side")
         if risk_per_contract:
             floor = risk_per_contract / (args.risk_pct / 100.0)
-            print(f"  a {args.stop_points:g}-point stop risks ${risk_per_contract:,.0f} per contract, so "
+            print(f"  a {effective_stop:g}-point stop risks ${risk_per_contract:,.0f} per contract, so "
                   f"{args.risk_pct}% risk needs ~${floor:,.0f} of equity for the FIRST contract")
         print()
         for label, all_trades in by_variant.items():
@@ -412,7 +432,7 @@ def main(argv=None) -> int:
     if args.sweep_delay:
         print("day-delay sweep (the video's optimization, run on each window separately)")
         for delay in DELAY_SWEEP:
-            all_trades = run_variant(bars, args, EXIT_MODE_FIRST_PROFITABLE_CLOSE, delay, "close")
+            all_trades = run_variant(bars, args, EXIT_MODE_FIRST_PROFITABLE_CLOSE, delay, "close", symbol=args.symbol)
             cells = []
             for window_name, window in WINDOWS.items():
                 windowed = [t for t in all_trades if in_window(t["entry_date"], *window)]
