@@ -117,15 +117,23 @@ def main():
 
         # Signal output
         if result["signal"] == "BUY":
-            print(f"\n[SIGNAL] **BUY** - RSI crossed below {result['entry_level']}")
-            print(f"   -> Trade size: $25 on Trading 212")
-            print(f"   -> Entry: Now")
+            print(f"\n{'='*70}")
+            print(f">>> BUY SIGNAL <<<")
+            print(f"{'='*70}")
+            print(f"RSI crossed below {result['entry_level']}")
+            print(f"Trade size: $25 on Trading 212")
+            print(f"Entry: NOW")
+            print(f"{'='*70}")
         elif result["signal"] == "SETUP":
-            print(f"\n[SIGNAL] **SETUP** - RSI is low, waiting for cross")
-            print(f"   -> Monitor for entry tomorrow")
+            print(f"\n{'='*70}")
+            print(f">>> SETUP (WATCH) <<<")
+            print(f"{'='*70}")
+            print(f"RSI is low, waiting for cross")
+            print(f"Monitor for entry tomorrow")
+            print(f"{'='*70}")
         else:
-            print(f"\n[SIGNAL] **WAIT** - No signal")
-            print(f"   -> RSI not low or price below SMA")
+            print(f"\n>>> WAIT - No signal <<<")
+            print(f"RSI not low enough or price below SMA")
 
         print()
 
