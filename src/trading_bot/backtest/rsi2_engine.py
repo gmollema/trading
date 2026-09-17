@@ -130,6 +130,8 @@ def run_rsi2_futures_backtest(
     risk_pct: float = DEFAULT_RISK_PCT,
     max_margin_pct: float = DEFAULT_MAX_MARGIN_PCT,
     slippage_ticks: float = DEFAULT_SLIPPAGE_TICKS,
+    atr: list[float | None] | None = None,
+    atr_median: list[float | None] | None = None,
 ) -> dict:
     """Walk already-generated point trades, sizing each against the equity
     standing when it opened and charging costs on both legs.
@@ -143,6 +145,10 @@ def run_rsi2_futures_backtest(
     equity curve, which is what makes the reported drawdown a real one
     rather than the closed-trade figure a first-profitable-close exit
     flatters (see rsi2_signals).
+
+    When `atr` and `atr_median` are provided, position size is adjusted
+    inversely to volatility: high volatility reduces contracts, low volatility
+    increases them. This normalizes risk across different market regimes.
 
     Returns {"trades", "equity_curve", "skipped_trades", "final_equity",
     "locked_out_from"}.
@@ -172,6 +178,15 @@ def run_rsi2_futures_backtest(
         contracts = contracts_for_trade(
             equity, trade["entry_price"], trade["stop_price"], spec, risk_pct, max_margin_pct
         )
+
+        # Apply volatility adjustment if ATR data is available
+        if contracts >= 1 and atr is not None and atr_median is not None:
+            entry_idx = trade["entry_idx"]
+            if entry_idx < len(atr) and atr[entry_idx] is not None and atr_median[entry_idx] is not None:
+                close_at_entry = closes[entry_idx]
+                adjusted = max(1, int(contracts / (atr[entry_idx] / atr_median[entry_idx]))) if atr_median[entry_idx] > 0 else contracts
+                contracts = adjusted
+
         if contracts < 1:
             skipped += 1
             if lockout_from is None:

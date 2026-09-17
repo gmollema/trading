@@ -60,6 +60,12 @@ from trading_bot.backtest.rsi2_signals import (
     EXIT_MODE_FIRST_PROFITABLE_CLOSE,
     EXIT_MODE_RSI,
     find_rsi2_long_trades,
+    find_rsi2_scale_in_trades,
+    DEFAULT_MAX_POSITIONS,
+    DEFAULT_ATR_PERIOD,
+    DEFAULT_ATR_MEDIAN_LOOKBACK,
+    wilder_atr,
+    trailing_median,
 )
 from trading_bot.cli.rsi2_fetch_data import DAILY_INDEX_DIR, safe_filename
 
@@ -97,6 +103,14 @@ def parse_args(argv=None) -> argparse.Namespace:
     parser.add_argument("--margin-per-contract", type=float, default=None,
                         help="override the contract's assumed margin (it moves with volatility; see rsi2_engine)")
     parser.add_argument("--out-csv", type=str, default=None)
+
+    # High-priority improvements
+    parser.add_argument("--scale-in", action="store_true", help="use scale-in variant (add on further dips)")
+    parser.add_argument("--first-dip", type=int, default=1,
+                        help="only take entries starting at Nth dip (1=first, 3=third); with scale-in (default 1)")
+    parser.add_argument("--max-positions", type=int, default=3, help="max concurrent positions for scale-in variant")
+    parser.add_argument("--volatility-adjusted", action="store_true",
+                        help="scale position size inversely to ATR (normalize risk across volatility regimes)")
     return parser.parse_args(argv)
 
 
@@ -116,10 +130,17 @@ def dollar_summary(point_trades: list[dict], bars: dict, window: tuple[str | Non
     for the benchmark, and any such choice would decide the comparison
     by itself.
     """
+    atr = None
+    atr_median = None
+    if args.volatility_adjusted:
+        atr = wilder_atr(bars["high"], bars["low"], bars["close"], DEFAULT_ATR_PERIOD)
+        atr_median = trailing_median(atr, DEFAULT_ATR_MEDIAN_LOOKBACK)
+
     result = run_rsi2_futures_backtest(
         point_trades, bars, args.initial_capital, spec,
         risk_pct=args.risk_pct, max_margin_pct=args.max_margin_pct,
         slippage_ticks=args.slippage_ticks,
+        atr=atr, atr_median=atr_median,
     )
     taken = result["trades"]
     final = result["final_equity"]
@@ -278,24 +299,39 @@ def _median(values: list[float]) -> float:
     return (ordered[mid - 1] + ordered[mid]) / 2
 
 
-def run_variant(bars: dict, args: argparse.Namespace, exit_mode: str, min_hold_days: int,
-                exit_timing: str) -> list[dict]:
+def run_variant(bars: dict, args: argparse.Namespace, exit_mode: str = None, min_hold_days: int = None,
+                exit_timing: str = None, use_scale_in: bool = False) -> list[dict]:
     """One full walk over the whole cached series. Windowing is applied
     afterwards, by entry date, rather than by slicing the bars first --
     slicing would fabricate an artificial end-of-data exit at every
     window boundary and would strip the 200 bars of SMA warmup."""
-    trades = find_rsi2_long_trades(
-        bars,
-        rsi_period=args.rsi_period,
-        entry_level=args.entry_level,
-        exit_level=args.exit_level,
-        sma_period=args.sma_period,
-        stop_points=None if (args.no_stop or args.stop_pct is not None) else args.stop_points,
-        stop_pct=args.stop_pct,
-        exit_mode=exit_mode,
-        min_hold_days=min_hold_days,
-        exit_timing=exit_timing,
-    )
+    if use_scale_in:
+        trades = find_rsi2_scale_in_trades(
+            bars,
+            rsi_period=args.rsi_period,
+            entry_level=args.entry_level,
+            exit_level=args.exit_level,
+            sma_period=args.sma_period,
+            max_positions=args.max_positions,
+            first_dip=args.first_dip,
+            stop_pct=args.stop_pct,
+            exit_timing=exit_timing or "close",
+            entry_timing="close",
+            regime_filter=False,
+        )
+    else:
+        trades = find_rsi2_long_trades(
+            bars,
+            rsi_period=args.rsi_period,
+            entry_level=args.entry_level,
+            exit_level=args.exit_level,
+            sma_period=args.sma_period,
+            stop_points=None if (args.no_stop or args.stop_pct is not None) else args.stop_points,
+            stop_pct=args.stop_pct,
+            exit_mode=exit_mode or EXIT_MODE_FIRST_PROFITABLE_CLOSE,
+            min_hold_days=min_hold_days or args.min_hold_days,
+            exit_timing=exit_timing or "close",
+        )
     for trade in trades:
         trade["net_points"] = trade["points"] - args.cost_points
     return trades
@@ -328,8 +364,11 @@ def main(argv=None) -> int:
 
     rows: list[dict] = []
     by_variant: dict[str, list[dict]] = {}
-    for label, exit_mode, min_hold, timing in variants(args):
-        all_trades = run_variant(bars, args, exit_mode, min_hold, timing)
+
+    if args.scale_in:
+        print(f"Scale-in variant: max {args.max_positions} positions, first entry at dip {args.first_dip}\n")
+        label = f"scale_in_dip{args.first_dip}_max{args.max_positions}"
+        all_trades = run_variant(bars, args, use_scale_in=True)
         by_variant[label] = all_trades
         for window_name, window in WINDOWS.items():
             windowed = [t for t in all_trades if in_window(t["entry_date"], *window)]
@@ -337,6 +376,16 @@ def main(argv=None) -> int:
             rows.append(summary)
             print(f"{label:32s} {window_name:11s} {json.dumps({k: v for k, v in summary.items() if k not in ('variant', 'window')})}")
         print()
+    else:
+        for label, exit_mode, min_hold, timing in variants(args):
+            all_trades = run_variant(bars, args, exit_mode, min_hold, timing)
+            by_variant[label] = all_trades
+            for window_name, window in WINDOWS.items():
+                windowed = [t for t in all_trades if in_window(t["entry_date"], *window)]
+                summary = {"variant": label, "window": window_name, **summarize(windowed, bars, window)}
+                rows.append(summary)
+                print(f"{label:32s} {window_name:11s} {json.dumps({k: v for k, v in summary.items() if k not in ('variant', 'window')})}")
+            print()
 
     dollar_rows: list[dict] = []
     if args.dollars:

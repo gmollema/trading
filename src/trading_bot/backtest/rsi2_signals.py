@@ -675,3 +675,26 @@ def _new_pos(campaign: int, num: int, i: int, price: float, date, stop_pct: floa
         "entry_price": price,
         "stop_price": price * (1 - stop_pct / 100.0) if stop_pct is not None else None,
     }
+
+
+def volatility_adjusted_size(
+    base_size: int,
+    atr: float | None,
+    close: float,
+    atr_median: float | None,
+) -> int:
+    """Scale position size inversely to volatility (ATR as % of price).
+
+    When ATR is elevated relative to its median, reduce size to normalize risk.
+    When ATR is depressed (calm markets), increase size to take full allocation.
+
+    Returns the adjusted contract count, floored to whole contracts.
+    """
+    if atr is None or atr_median is None or atr_median == 0 or close == 0:
+        return base_size
+    atr_pct = (atr / close) * 100.0
+    median_pct = (atr_median / close) * 100.0
+    if median_pct == 0:
+        return base_size
+    volatility_ratio = atr_pct / median_pct
+    return max(1, int(base_size / volatility_ratio))
