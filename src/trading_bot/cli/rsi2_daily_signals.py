@@ -121,18 +121,15 @@ def main():
         result = check_signal(symbol, bars)
 
         print(f"[PRICE] {label} ({symbol})")
-        print(f"   Close: ${result['today_close']:.2f}")
 
         # Color-code RSI condition
         rsi_color = GREEN if result['rsi_is_low'] else RED
         print(f"   {rsi_color}RSI(2): {result['today_rsi']:.1f} (entry at < {result['entry_level']}){RESET}")
 
-        print(f"   SMA({result['sma_period']}): ${result['today_sma']:.2f}")
-
-        # Color-code Price > SMA condition with explicit prices
+        # Color-code Price > SMA condition with explicit prices on same line
         sma_color = GREEN if result['price_above_sma'] else RED
         sma_text = "YES" if result['price_above_sma'] else "NO"
-        print(f"   {sma_color}Close price (${result['today_close']:.2f}) above SMA price (${result['today_sma']:.2f}) -> {sma_text}{RESET}")
+        print(f"   {sma_color}Close: ${result['today_close']:.2f}  |  SMA({result['sma_period']}): ${result['today_sma']:.2f}  ->  {sma_text}{RESET}")
 
         # Signal output with color-coded decision
         if result["signal"] == "BUY":
