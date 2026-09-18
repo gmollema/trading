@@ -125,12 +125,14 @@ def main():
         # Color-code RSI condition
         rsi_color = GREEN if result['rsi_is_low'] else RED
         rsi_text = "YES" if result['rsi_is_low'] else "NO"
-        print(f"   {rsi_color}RSI(2): {result['today_rsi']:.1f} (entry at < {result['entry_level']})  ->  {rsi_text}{RESET}")
+        rsi_condition = f"RSI(2): {result['today_rsi']:.1f} (entry at < {result['entry_level']})"
+        print(f"   {rsi_color}{rsi_condition:<50}  ->  {rsi_text}{RESET}")
 
         # Color-code Price > SMA condition with explicit prices on same line
         sma_color = GREEN if result['price_above_sma'] else RED
         sma_text = "YES" if result['price_above_sma'] else "NO"
-        print(f"   {sma_color}Close: ${result['today_close']:.2f}  >  SMA({result['sma_period']}): ${result['today_sma']:.2f}  ->  {sma_text}{RESET}")
+        sma_condition = f"Close: ${result['today_close']:.2f}  >  SMA({result['sma_period']}): ${result['today_sma']:.2f}"
+        print(f"   {sma_color}{sma_condition:<50}  ->  {sma_text}{RESET}")
 
         # Signal output with color-coded decision
         if result["signal"] == "BUY":
