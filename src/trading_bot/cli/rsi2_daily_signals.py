@@ -124,7 +124,8 @@ def main():
 
         # Color-code RSI condition
         rsi_color = GREEN if result['rsi_is_low'] else RED
-        print(f"   {rsi_color}RSI(2): {result['today_rsi']:.1f} (entry at < {result['entry_level']}){RESET}")
+        rsi_text = "YES" if result['rsi_is_low'] else "NO"
+        print(f"   {rsi_color}RSI(2): {result['today_rsi']:.1f} (entry at < {result['entry_level']})  ->  {rsi_text}{RESET}")
 
         # Color-code Price > SMA condition with explicit prices on same line
         sma_color = GREEN if result['price_above_sma'] else RED
