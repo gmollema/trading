@@ -119,11 +119,19 @@ def main():
 
         print(f"[PRICE] {label} ({symbol})")
         print(f"   Close: ${result['today_close']:.2f}")
-        print(f"   RSI(2): {result['today_rsi']:.1f} (entry at < {result['entry_level']})")
-        print(f"   SMA({result['sma_period']}): ${result['today_sma']:.2f}")
-        print(f"   Price > SMA: {'YES' if result['price_above_sma'] else 'NO'}")
 
-        # Signal output
+        # Color-code RSI condition
+        rsi_color = GREEN if result['rsi_is_low'] else RED
+        print(f"   {rsi_color}RSI(2): {result['today_rsi']:.1f} (entry at < {result['entry_level']}){RESET}")
+
+        print(f"   SMA({result['sma_period']}): ${result['today_sma']:.2f}")
+
+        # Color-code Price > SMA condition
+        sma_color = GREEN if result['price_above_sma'] else RED
+        sma_text = "YES" if result['price_above_sma'] else "NO"
+        print(f"   {sma_color}Price > SMA: {sma_text}{RESET}")
+
+        # Signal output with color-coded decision
         if result["signal"] == "BUY":
             print(f"\n{GREEN}{'='*70}")
             print(f"{GREEN}{BOLD}>>> BUY SIGNAL <<<{RESET}")
@@ -140,8 +148,10 @@ def main():
             print(f"Monitor for entry tomorrow{RESET}")
             print(f"{YELLOW}{'='*70}{RESET}")
         else:
-            print(f"\n{CYAN}>>> WAIT - No signal <<<{RESET}")
-            print(f"{CYAN}RSI not low enough or price below SMA{RESET}")
+            print(f"\n{RED}{'='*70}")
+            print(f"{RED}{BOLD}>>> WAIT - No signal <<<{RESET}")
+            print(f"{RED}RSI not low enough or price below SMA{RESET}")
+            print(f"{RED}{'='*70}{RESET}")
 
         print()
 

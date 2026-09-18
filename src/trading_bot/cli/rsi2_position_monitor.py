@@ -3,7 +3,7 @@
 Usage:
     python -m trading_bot.cli.rsi2_position_monitor
 
-Reads trades.csv (your open positions) and shows:
+Reads rsi2_open_positions.json (actual open positions) and shows:
 - Days held
 - Current price and P&L
 - SELL signal if 12+ days AND profitable
@@ -11,7 +11,7 @@ Reads trades.csv (your open positions) and shows:
 
 from __future__ import annotations
 
-import csv
+import json
 from datetime import datetime
 from pathlib import Path
 
@@ -26,30 +26,34 @@ RESET = "\033[0m"
 BOLD = "\033[1m"
 
 def load_trades() -> list[dict]:
-    """Load open trades from trades.csv."""
-    trades_file = Path("trades.csv")
+    """Load actual open positions from rsi2_open_positions.json."""
+    positions_file = Path("rsi2_open_positions.json")
 
-    if not trades_file.exists():
-        print("\n[ERROR] trades.csv not found!")
-        print("\nCreate trades.csv in your project folder with this format:")
-        print("symbol,entry_date,entry_price,entry_amount,stop_loss")
-        print("^GSPC,2026-09-18,7620.60,25.00,225")
-        print("^IXIC,2026-09-18,26300.00,25.00,125")
+    if not positions_file.exists():
+        print("\n[INFO] No open positions file found")
         return []
 
-    trades = []
-    with open(trades_file, 'r') as f:
-        reader = csv.DictReader(f)
-        for row in reader:
-            trades.append({
-                'symbol': row['symbol'],
-                'entry_date': row['entry_date'],
-                'entry_price': float(row['entry_price']),
-                'entry_amount': float(row['entry_amount']),
-                'stop_loss': float(row['stop_loss']),
-            })
+    try:
+        with open(positions_file, 'r') as f:
+            data = json.load(f)
+            if not isinstance(data, list):
+                print("\n[ERROR] Invalid positions format")
+                return []
 
-    return trades
+            trades = []
+            for pos in data:
+                # Convert RSI2 position format to monitor format
+                trades.append({
+                    'symbol': pos.get('symbol', ''),
+                    'entry_date': pos.get('entry_date', '').split('T')[0],  # Extract date from ISO string
+                    'entry_price': float(pos.get('entry_price', 0)),
+                    'entry_amount': float(pos.get('contracts', 1)) * float(pos.get('entry_price', 0)),
+                    'stop_loss': 0,  # RSI2 uses dynamic stops, not fixed ones
+                })
+            return trades
+    except (json.JSONDecodeError, OSError) as e:
+        print(f"\n[ERROR] Failed to read positions: {e}")
+        return []
 
 def get_current_price(symbol: str) -> float | None:
     """Get current price for a symbol."""
@@ -67,16 +71,14 @@ def check_exit_signal(trade: dict, current_price: float) -> dict:
     today = datetime.now()
     days_held = (today - entry_date).days
 
-    # Calculate P&L
+    # Calculate P&L (for RSI2, entry_amount is already entry_price * contracts)
     price_change = current_price - trade['entry_price']
-    pnl = (price_change / trade['entry_price']) * trade['entry_amount']
+    contracts = trade['entry_amount'] / trade['entry_price'] if trade['entry_price'] > 0 else 1
+    pnl = price_change * contracts
     pnl_pct = (price_change / trade['entry_price']) * 100
 
-    # Exit signal: 12+ days AND profitable
+    # Exit signal: 12+ days AND profitable (RSI2 uses dynamic management)
     should_exit = days_held >= 12 and pnl > 0
-
-    # Check if stop hit
-    stop_hit = price_change < -trade['stop_loss']
 
     return {
         'symbol': trade['symbol'],
@@ -86,20 +88,17 @@ def check_exit_signal(trade: dict, current_price: float) -> dict:
         'pnl': pnl,
         'pnl_pct': pnl_pct,
         'should_exit': should_exit,
-        'stop_hit': stop_hit,
+        'stop_hit': False,
     }
 
 def main():
     trades = load_trades()
 
-    if not trades:
-        return
-
     print(f"\n{'='*70}")
     print(f"POSITION MONITOR - {datetime.now().strftime('%Y-%m-%d %H:%M')}")
     print(f"{'='*70}\n")
 
-    if len(trades) == 0:
+    if not trades:
         print("[INFO] No open positions\n")
         return
 
@@ -112,21 +111,13 @@ def main():
 
         result = check_exit_signal(trade, current_price)
 
-        # Map symbols to labels
-        label = "S&P 500 (SPY)" if trade['symbol'] == "^GSPC" else "Nasdaq 100 (QQQ)"
-
-        print(f"[POSITION] {label} ({trade['symbol']})")
+        print(f"[POSITION] {result['symbol']}")
         print(f"   Entry: ${result['entry_price']:.2f} ({result['days_held']} days ago)")
         print(f"   Current: ${result['current_price']:.2f}")
         print(f"   P&L: ${result['pnl']:+.2f} ({result['pnl_pct']:+.1f}%)")
 
         # Exit signal
-        if result['stop_hit']:
-            print(f"\n{RED}{'='*70}")
-            print(f"{RED}{BOLD}[ACTION] STOP HIT - SELL IMMEDIATELY{RESET}")
-            print(f"{RED}{'='*70}{RESET}")
-            print(f"{RED}Loss: ${result['pnl']:.2f}{RESET}")
-        elif result['should_exit']:
+        if result['should_exit']:
             print(f"\n{GREEN}{'='*70}")
             print(f"{GREEN}{BOLD}[ACTION] SELL - 12+ DAYS AND PROFITABLE{RESET}")
             print(f"{GREEN}{'='*70}{RESET}")
