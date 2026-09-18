@@ -10,10 +10,13 @@ S&P 500 and Nasdaq 100. Output tells you exactly what to trade.
 from __future__ import annotations
 
 import sys
+import warnings
 from datetime import datetime
 from pathlib import Path
 
 import yfinance as yf
+
+warnings.filterwarnings("ignore", category=FutureWarning)
 
 from trading_bot.backtest.rsi2_signals import (
     wilder_rsi,
