@@ -47,10 +47,10 @@ def fetch_recent_bars(symbol: str, days: int = 250) -> dict | None:
 
         return {
             "date": list(df["Date"].values),
-            "open": [float(x) for x in df["Open"].values],
-            "high": [float(x) for x in df["High"].values],
-            "low": [float(x) for x in df["Low"].values],
-            "close": [float(x) for x in df["Close"].values],
+            "open": [float(x.item()) if hasattr(x, 'item') else float(x) for x in df["Open"].values],
+            "high": [float(x.item()) if hasattr(x, 'item') else float(x) for x in df["High"].values],
+            "low": [float(x.item()) if hasattr(x, 'item') else float(x) for x in df["Low"].values],
+            "close": [float(x.item()) if hasattr(x, 'item') else float(x) for x in df["Close"].values],
         }
     except Exception as e:
         print(f"Error fetching {symbol}: {e}")
