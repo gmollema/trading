@@ -9,9 +9,17 @@ if !WIN_VER! GEQ 10 (
     reg add HKCU\Console /v VirtualTerminalLevel /t REG_DWORD /d 1 /f >nul 2>&1
 )
 
+REM Create logs directory if it doesn't exist
+if not exist logs mkdir logs
+
+REM Generate timestamp for log file
+for /f "tokens=2-4 delims=/ " %%a in ('date /t') do (set mydate=%%c-%%a-%%b)
+for /f "tokens=1-2 delims=/:" %%a in ('time /t') do (set mytime=%%a-%%b)
+set TIMESTAMP=%mydate%_%mytime%
+
 echo.
 echo ======================================================================
-echo RSI2 TRADING SYSTEM - Daily Check
+echo RSI2 TRADING SYSTEM - Daily Check - %TIMESTAMP%
 echo ======================================================================
 echo.
 
@@ -26,19 +34,24 @@ if exist rsi2_open_positions.json (
     )
 )
 
+REM Log the check
+echo [%TIMESTAMP%] Daily Signal Check >> logs\rsi2_daily_checks.log
+
 if !HAS_POSITIONS! equ 1 (
     echo OPEN POSITIONS DETECTED - Showing position monitor only
+    echo [%TIMESTAMP%] OPEN POSITIONS DETECTED >> logs\rsi2_daily_checks.log
     echo.
-    python -m trading_bot.cli.rsi2_position_monitor
+    python -m trading_bot.cli.rsi2_position_monitor >> logs\rsi2_daily_checks.log 2>&1
 ) else (
     echo NO OPEN POSITIONS - Showing entry signals only
+    echo [%TIMESTAMP%] NO OPEN POSITIONS - CHECKING FOR ENTRY SIGNALS >> logs\rsi2_daily_checks.log
     echo.
-    python -m trading_bot.cli.rsi2_daily_signals
+    python -m trading_bot.cli.rsi2_daily_signals | tee -a logs\rsi2_daily_checks.log
 )
 
 echo.
 echo ======================================================================
-echo Done! Act on any colored signals above
+echo Done! Logged to logs\rsi2_daily_checks.log
 echo ======================================================================
 echo.
 pause
