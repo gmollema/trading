@@ -1,4 +1,14 @@
-"""Backtest CLI for the RSI(20) dip strategy (see backtest/rsi20_dip_signals.py).
+"""DEPRECATED: RSI(20) dip strategy - DO NOT USE
+
+This strategy has been thoroughly backtested and ABANDONED.
+It loses to buy-and-hold on ALL instruments tested.
+
+See: RSI20_DIP_FINDINGS.md for full analysis.
+Use RSI(2) strategy instead (rsi2_backtest.py).
+
+---
+
+Backtest CLI for the RSI(20) dip strategy (see backtest/rsi20_dip_signals.py).
 
 Reports in PERCENT and compounds 100% of equity per trade, which is what
 the TradingView reference does, so the numbers here are comparable to its
@@ -11,13 +21,6 @@ Buy-and-hold is printed alongside every result, on the same window and
 the same open-to-close basis. It is not decoration: the strategy loses to
 it on every instrument tested, and any run that omits the benchmark will
 read as a success when it is not.
-
-Usage:
-    python -m trading_bot.cli.rsi20_dip_backtest
-    python -m trading_bot.cli.rsi20_dip_backtest --symbols "^GSPC,NQ=F,^GDAXI"
-    python -m trading_bot.cli.rsi20_dip_backtest --entry-level 55 --exit-level 80
-    python -m trading_bot.cli.rsi20_dip_backtest --grid
-    python -m trading_bot.cli.rsi20_dip_backtest --out-csv rsi20_dip_results.csv
 """
 
 from __future__ import annotations

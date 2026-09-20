@@ -1,4 +1,13 @@
-"""Scheduled daily entrypoint for the RSI(20) dip strategy
+"""⚠️  DEPRECATED: RSI(20) dip strategy - DO NOT ARM OR RUN
+
+This strategy has been thoroughly backtested and ABANDONED.
+It loses to buy-and-hold on ALL instruments tested.
+See: RSI20_DIP_FINDINGS.md for full analysis.
+Use RSI(2) strategy instead (rsi2_cycle.py).
+
+---
+
+Scheduled daily entrypoint for the RSI(20) dip strategy
 (see rsi20_dip_live.py).
 
 Runs ONCE per trading day a few minutes before the 09:30 ET open and does

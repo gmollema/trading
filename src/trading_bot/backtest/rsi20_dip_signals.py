@@ -1,4 +1,13 @@
-"""Signal generation for the RSI dip mean-reversion strategy, reconstructed
+"""⚠️  DEPRECATED: RSI(20) dip strategy - ABANDONED after backtesting
+
+This strategy loses to buy-and-hold on ALL instruments tested.
+It is kept for historical reference only.
+See: RSI20_DIP_FINDINGS.md for full analysis.
+Use RSI(2) strategy instead (rsi2_signals.py).
+
+---
+
+Signal generation for the RSI dip mean-reversion strategy, reconstructed
 from a closed-source TradingView indicator ("Webinar Strategy") on 2026-09-07.
 
 CURRENT OPTIMIZATION (2026-09-12):
