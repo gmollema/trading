@@ -18,6 +18,7 @@ from datetime import datetime
 from pathlib import Path
 
 import yfinance as yf
+from trading_bot.util.notifier import notify
 
 from trading_bot.backtest.rsi2_signals import simple_moving_average
 
@@ -120,8 +121,10 @@ def main():
         # Signal output
         if result["signal"] == "BUY":
             print(f"{GREEN}[BUY] Golden cross - 30-MA > 90-MA{RESET}")
+            notify("MA 30/90 BUY Signal", f"{label}\nPrice: ${result['today_close']:.2f}\n30-MA: ${result['today_ma30']:.2f}")
         elif result["signal"] == "SELL":
             print(f"{RED}[SELL] Death cross - 30-MA < 90-MA{RESET}")
+            notify("MA 30/90 SELL Signal", f"{label}\nPrice: ${result['today_close']:.2f}\n30-MA: ${result['today_ma30']:.2f}")
         elif result["signal"] == "HOLD":
             print(f"{YELLOW}[UPTREND] No cross signal{RESET}")
         else:

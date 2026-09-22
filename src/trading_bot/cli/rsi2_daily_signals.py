@@ -15,6 +15,7 @@ from datetime import datetime
 from pathlib import Path
 
 import yfinance as yf
+from trading_bot.util.notifier import notify
 
 warnings.filterwarnings("ignore", category=FutureWarning)
 
@@ -135,6 +136,7 @@ def main():
         # Signal output
         if result["signal"] == "BUY":
             print(f"{GREEN}[BUY] RSI crossed below {result['entry_level']}{RESET}")
+            notify("RSI2 BUY Signal", f"{label}\nRSI: {result['today_rsi']:.1f}\nPrice: ${result['today_close']:.2f}")
         elif result["signal"] == "SETUP":
             print(f"{YELLOW}[SETUP] RSI is low, watch for cross{RESET}")
         else:

@@ -16,6 +16,7 @@ warnings.filterwarnings('ignore', category=DeprecationWarning)
 
 from datetime import datetime, timedelta
 import yfinance as yf
+from trading_bot.util.notifier import notify
 
 from trading_bot.backtest.rsi2_signals import simple_moving_average
 
@@ -110,8 +111,10 @@ def main():
 
     if result["signal"] == "BUY":
         print(f"{GREEN}[BUY] Golden cross - Nasdaq outperforming{RESET}")
+        notify("RS BUY Signal", f"Nasdaq outperforming\nRatio: {result['current_ratio']:.4f}\nMA: {result['ratio_ma']:.4f}")
     elif result["signal"] == "SELL":
         print(f"{RED}[SELL] Death cross - Nasdaq underperforming{RESET}")
+        notify("RS SELL Signal", f"Nasdaq underperforming\nRatio: {result['current_ratio']:.4f}\nMA: {result['ratio_ma']:.4f}")
     elif result["signal"] == "HOLD":
         print(f"{GREEN}[UPTREND] Ratio > MA, no cross signal{RESET}")
     else:
