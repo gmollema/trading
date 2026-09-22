@@ -8,6 +8,10 @@ Usage:
 
 from __future__ import annotations
 
+import warnings
+warnings.filterwarnings('ignore', category=FutureWarning)
+warnings.filterwarnings('ignore', category=DeprecationWarning)
+
 import csv
 from datetime import datetime
 from pathlib import Path
