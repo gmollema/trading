@@ -136,8 +136,8 @@ def main():
             print(f"Exit: NOW{RESET}")
             print(f"{RED}{'='*70}{RESET}")
         elif result["signal"] == "HOLD":
-            print(f"\n{YELLOW}[SIGNAL] HOLD - In uptrend, 30-MA > 90-MA")
-            print(f"   Continue holding existing position{RESET}")
+            print(f"\n{YELLOW}[SIGNAL] UPTREND - 30-MA > 90-MA, no entry cross")
+            print(f"   If holding: continue. If not: wait for golden cross{RESET}")
         else:
             print(f"\n{CYAN}[SIGNAL] WAIT - In downtrend, no entry signal")
             print(f"   Waiting for golden cross{RESET}")
