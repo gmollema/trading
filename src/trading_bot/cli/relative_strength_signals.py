@@ -113,9 +113,9 @@ def main():
     elif result["signal"] == "SELL":
         print(f"{RED}[SELL] Death cross - Nasdaq underperforming{RESET}")
     elif result["signal"] == "HOLD":
-        print(f"{GREEN}[HOLD] Nasdaq outperforming{RESET}")
+        print(f"{GREEN}[UPTREND] Ratio > MA, no cross signal{RESET}")
     else:
-        print(f"{CYAN}[WAIT] Nasdaq underperforming{RESET}")
+        print(f"{CYAN}[WAIT] Ratio < MA, Nasdaq underperforming{RESET}")
 
 if __name__ == "__main__":
     main()
