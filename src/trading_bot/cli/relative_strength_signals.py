@@ -10,6 +10,10 @@ Usage:
 
 from __future__ import annotations
 
+import warnings
+warnings.filterwarnings('ignore', category=FutureWarning)
+warnings.filterwarnings('ignore', category=DeprecationWarning)
+
 from datetime import datetime, timedelta
 import yfinance as yf
 
