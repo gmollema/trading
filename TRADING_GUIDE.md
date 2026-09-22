@@ -21,7 +21,7 @@ Stop loss:
 
 ## Daily Trading Routine
 
-### Morning (Before market open)
+### Morning (9:15-9:25 AM ET, before market opens at 9:30 AM)
 
 1. **Run all signal generators:**
    ```
