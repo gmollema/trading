@@ -109,12 +109,7 @@ def check_position(trade: dict, current_price: float) -> dict:
 def main():
     trades = load_trades()
 
-    print(f"\n{'='*70}")
-    print(f"MA 30/90 POSITION MONITOR - {datetime.now().strftime('%Y-%m-%d %H:%M')}")
-    print(f"{'='*70}\n")
-
     if len(trades) == 0:
-        print("[INFO] No open MA positions\n")
         return
 
     for trade in trades:

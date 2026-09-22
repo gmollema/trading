@@ -98,9 +98,7 @@ def get_relative_strength_signal(ma_period: int = 20) -> dict:
         return {"signal": "ERROR", "reason": str(e)}
 
 def main():
-    print(f"\n{'='*70}")
-    print(f"RELATIVE STRENGTH SIGNAL - {datetime.now().strftime('%Y-%m-%d %H:%M')}")
-    print(f"{'='*70}\n")
+    print(f"\n[RELATIVE STRENGTH]")
 
     result = get_relative_strength_signal()
 
@@ -108,31 +106,16 @@ def main():
         print(f"[ERROR] {result['reason']}\n")
         return
 
-    # Price display
-    print(f"[RATIO] Nasdaq/SPX: {result['current_ratio']:.4f}")
-    print(f"[MA20]  Ratio MA(20): {result['ratio_ma']:.4f}")
-    print(f"[DIST]  Distance: {result['ratio_distance']:+.2f}%\n")
+    print(f"Ratio: {result['current_ratio']:.4f} / MA: {result['ratio_ma']:.4f} ({result['ratio_distance']:+.2f}%)")
 
-    # Signal display
     if result["signal"] == "BUY":
-        print(f"{GREEN}{BOLD}[SIGNAL] BUY - Golden Cross{RESET}")
-        print(f"{GREEN}Action: {result['action']}")
-        print(f"{GREEN}Buy Nasdaq 100 (QQQ) at market price{RESET}\n")
-
+        print(f"{GREEN}[BUY] Golden cross - Nasdaq outperforming{RESET}")
     elif result["signal"] == "SELL":
-        print(f"{RED}{BOLD}[SIGNAL] SELL - Death Cross{RESET}")
-        print(f"{RED}Action: {result['action']}")
-        print(f"{RED}Exit Nasdaq 100 (QQQ) positions at market price{RESET}\n")
-
+        print(f"{RED}[SELL] Death cross - Nasdaq underperforming{RESET}")
     elif result["signal"] == "HOLD":
-        print(f"{GREEN}[SIGNAL] HOLD - Nasdaq outperforming{RESET}")
-        print(f"{GREEN}Action: {result['action']}")
-        print(f"{GREEN}Continue holding QQQ if in position{RESET}\n")
-
+        print(f"{GREEN}[HOLD] Nasdaq outperforming{RESET}")
     else:
-        print(f"{CYAN}[SIGNAL] WAIT - Nasdaq underperforming{RESET}")
-        print(f"{CYAN}Action: {result['action']}")
-        print(f"{CYAN}Stay in cash, monitor for entry signal{RESET}\n")
+        print(f"{CYAN}[WAIT] Nasdaq underperforming{RESET}")
 
 if __name__ == "__main__":
     main()

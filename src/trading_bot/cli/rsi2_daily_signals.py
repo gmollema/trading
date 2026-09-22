@@ -108,9 +108,7 @@ def check_signal(symbol: str, bars: dict) -> dict:
     }
 
 def main():
-    print(f"\n{'='*70}")
-    print(f"RSI2 DAILY SIGNALS - {datetime.now().strftime('%Y-%m-%d %H:%M')}")
-    print(f"{'='*70}\n")
+    print(f"\n[RSI2]")
 
     for symbol, label in SYMBOLS.items():
         bars = fetch_recent_bars(symbol)
@@ -134,27 +132,13 @@ def main():
         sma_condition = f"Close: ${result['today_close']:.2f}  >  SMA({result['sma_period']}): ${result['today_sma']:.2f}"
         print(f"   {sma_color}{sma_condition:<50}  ->  {sma_text}{RESET}")
 
-        # Signal output with color-coded decision
+        # Signal output
         if result["signal"] == "BUY":
-            print(f"\n{GREEN}{'='*70}")
-            print(f"{GREEN}{BOLD}>>> BUY SIGNAL <<<{RESET}")
-            print(f"{GREEN}{'='*70}{RESET}")
-            print(f"{GREEN}RSI crossed below {result['entry_level']}")
-            print(f"Trade size: $25 on Trading 212")
-            print(f"Entry: NOW{RESET}")
-            print(f"{GREEN}{'='*70}{RESET}")
+            print(f"{GREEN}[BUY] RSI crossed below {result['entry_level']}{RESET}")
         elif result["signal"] == "SETUP":
-            print(f"\n{YELLOW}{'='*70}")
-            print(f"{YELLOW}{BOLD}>>> SETUP (WATCH) <<<{RESET}")
-            print(f"{YELLOW}{'='*70}{RESET}")
-            print(f"{YELLOW}RSI is low, waiting for cross")
-            print(f"Monitor for entry tomorrow{RESET}")
-            print(f"{YELLOW}{'='*70}{RESET}")
+            print(f"{YELLOW}[SETUP] RSI is low, watch for cross{RESET}")
         else:
-            print(f"\n{RED}{'='*70}")
-            print(f"{RED}{BOLD}>>> WAIT - No signal <<<{RESET}")
-            print(f"{RED}RSI not low enough or price below SMA{RESET}")
-            print(f"{RED}{'='*70}{RESET}")
+            print(f"{RED}[WAIT] No signal{RESET}")
 
         print()
 

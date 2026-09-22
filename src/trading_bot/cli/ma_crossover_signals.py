@@ -101,9 +101,7 @@ def check_signal(symbol: str, bars: dict) -> dict:
     }
 
 def main():
-    print(f"\n{'='*70}")
-    print(f"MA 30/90 CROSSOVER SIGNALS - {datetime.now().strftime('%Y-%m-%d %H:%M')}")
-    print(f"{'='*70}\n")
+    print(f"\n[MA 30/90]")
 
     for symbol, label in SYMBOLS.items():
         bars = fetch_recent_bars(symbol)
@@ -121,26 +119,13 @@ def main():
 
         # Signal output
         if result["signal"] == "BUY":
-            print(f"\n{GREEN}{'='*70}")
-            print(f"{GREEN}{BOLD}>>> BUY SIGNAL (GOLDEN CROSS) <<<{RESET}")
-            print(f"{GREEN}{'='*70}{RESET}")
-            print(f"{GREEN}30-MA crossed above 90-MA")
-            print(f"Trade size: $25 on Trading 212")
-            print(f"Entry: NOW{RESET}")
-            print(f"{GREEN}{'='*70}{RESET}")
+            print(f"{GREEN}[BUY] Golden cross - 30-MA > 90-MA{RESET}")
         elif result["signal"] == "SELL":
-            print(f"\n{RED}{'='*70}")
-            print(f"{RED}{BOLD}>>> SELL SIGNAL (DEATH CROSS) <<<{RESET}")
-            print(f"{RED}{'='*70}{RESET}")
-            print(f"{RED}30-MA crossed below 90-MA")
-            print(f"Exit: NOW{RESET}")
-            print(f"{RED}{'='*70}{RESET}")
+            print(f"{RED}[SELL] Death cross - 30-MA < 90-MA{RESET}")
         elif result["signal"] == "HOLD":
-            print(f"\n{YELLOW}[SIGNAL] UPTREND - 30-MA > 90-MA, no entry cross")
-            print(f"   If holding: continue. If not: wait for golden cross{RESET}")
+            print(f"{YELLOW}[UPTREND] No cross signal{RESET}")
         else:
-            print(f"\n{CYAN}[SIGNAL] WAIT - In downtrend, no entry signal")
-            print(f"   Waiting for golden cross{RESET}")
+            print(f"{CYAN}[WAIT] Downtrend{RESET}")
 
         print()
 

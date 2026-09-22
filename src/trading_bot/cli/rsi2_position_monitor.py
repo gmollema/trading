@@ -94,12 +94,7 @@ def check_exit_signal(trade: dict, current_price: float) -> dict:
 def main():
     trades = load_trades()
 
-    print(f"\n{'='*70}")
-    print(f"POSITION MONITOR - {datetime.now().strftime('%Y-%m-%d %H:%M')}")
-    print(f"{'='*70}\n")
-
     if not trades:
-        print("[INFO] No open positions\n")
         return
 
     for trade in trades:
