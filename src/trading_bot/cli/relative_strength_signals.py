@@ -41,8 +41,8 @@ def get_relative_strength_signal(ma_period: int = 20) -> dict:
 
         # Align data by taking minimum length
         min_len = min(len(spx_data), len(ndx_data))
-        spx_closes = [float(x) for x in spx_data["Close"].values[-min_len:]]
-        ndx_closes = [float(x) for x in ndx_data["Close"].values[-min_len:]]
+        spx_closes = [float(x) for x in spx_data["Close"].to_numpy().ravel()[-min_len:]]
+        ndx_closes = [float(x) for x in ndx_data["Close"].to_numpy().ravel()[-min_len:]]
         spx_dates = list(spx_data.index[-min_len:])
 
         # Calculate ratio

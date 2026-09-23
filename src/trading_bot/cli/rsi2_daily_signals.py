@@ -39,8 +39,11 @@ SYMBOLS = {
     "^IXIC": "Nasdaq 100 (QQQ)",
 }
 
-def fetch_recent_bars(symbol: str, days: int = 250) -> dict | None:
-    """Fetch recent daily bars for a symbol."""
+def fetch_recent_bars(symbol: str, days: int = 450) -> dict | None:
+    """Fetch recent daily bars for a symbol.
+
+    `days` is calendar days; 450 gives ~310 trading bars, enough for the SMA(250).
+    """
     try:
         df = yf.download(symbol, period=f"{days}d", progress=False)
         if df.empty or len(df) < 50:
@@ -130,7 +133,8 @@ def main():
         # Color-code Price > SMA condition with explicit prices on same line
         sma_color = GREEN if result['price_above_sma'] else RED
         sma_text = "YES" if result['price_above_sma'] else "NO"
-        sma_condition = f"Close: ${result['today_close']:.2f}  >  SMA({result['sma_period']}): ${result['today_sma']:.2f}"
+        sma_value = f"${result['today_sma']:.2f}" if result['today_sma'] is not None else "n/a"
+        sma_condition = f"Close: ${result['today_close']:.2f}  >  SMA({result['sma_period']}): {sma_value}"
         print(f"   {sma_color}{sma_condition:<50}  ->  {sma_text}{RESET}")
 
         # Signal output
