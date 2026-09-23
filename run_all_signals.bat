@@ -5,5 +5,6 @@ REM   e.g. run_all_signals.bat 1000 5 2.5   (defaults: 1000 5 2.5)
 
 cd /d "%~dp0"
 reg add HKCU\Console /v VirtualTerminalLevel /t REG_DWORD /d 1 /f >nul 2>&1
+echo Fetching prices...
 ".venv\Scripts\python.exe" -m trading_bot.cli.signals %*
 pause
