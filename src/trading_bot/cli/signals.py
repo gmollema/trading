@@ -46,7 +46,7 @@ RESET = "\033[0m"
 
 SPX, NDX = "^GSPC", "^IXIC"
 NAMES = {SPX: "SXR8", NDX: "SXRV"}  # Trading 212 ETFs: iShares Core S&P 500 / Nasdaq 100 (EUR, Xetra)
-INDEX = {SPX: "S&P", NDX: "Nasdaq"}
+INDEX = {SPX: "S&P-500", NDX: "Nasdaq"}
 STOP_POINTS = {SPX: 225.0, NDX: 125.0}
 RSI2_HOLD_DAYS = 12
 RS_MAX_HOLD_DAYS = 60  # test_relative_strength.py exits after 60 trading days regardless of the ratio
