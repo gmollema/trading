@@ -69,7 +69,7 @@ def load_csv(name: str) -> list[dict]:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("capital", nargs="?", type=float, default=500.0, help="account size in $ (default 500)")
+    parser.add_argument("capital", nargs="?", type=float, default=1000.0, help="account size in $ (default 1000)")
     parser.add_argument("spx_pct", nargs="?", type=float, default=5.0, help="%% of capital per S&P 500 trade (default 5)")
     parser.add_argument("qqq_pct", nargs="?", type=float, default=2.5, help="%% of capital per Nasdaq trade (default 2.5)")
     args = parser.parse_args()
