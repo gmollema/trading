@@ -7,6 +7,11 @@ Usage:
 Downloads S&P 500 and Nasdaq once, prints one table of signals, the open
 positions from trades.csv / trades_ma.csv / trades_rs.csv, and a list of
 actions with the dollar amount per trade (capital * pct).
+
+Signals are computed on the indexes (S&P 500, Nasdaq); the trades are placed in
+Trading 212 on the UCITS ETFs that follow them (SXR8, SXRV). Entry prices in
+the trade CSVs are index levels and stop losses are index points, so BUY lines
+print the index level to log and the stop loss as a % to set on the ETF.
 """
 
 from __future__ import annotations
@@ -40,7 +45,8 @@ BOLD = "\033[1m"
 RESET = "\033[0m"
 
 SPX, NDX = "^GSPC", "^IXIC"
-NAMES = {SPX: "SPY", NDX: "QQQ"}
+NAMES = {SPX: "SXR8", NDX: "SXRV"}  # Trading 212 ETFs: iShares Core S&P 500 / Nasdaq 100 (EUR, Xetra)
+INDEX = {SPX: "S&P", NDX: "Nasdaq"}
 STOP_POINTS = {SPX: 225.0, NDX: 125.0}
 RSI2_HOLD_DAYS = 12
 RS_MAX_HOLD_DAYS = 60  # test_relative_strength.py exits after 60 trading days regardless of the ratio
@@ -96,8 +102,8 @@ def load_csv(name: str) -> list[dict]:
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("capital", nargs="?", type=float, default=1000.0, help="account size in $ (default 1000)")
-    parser.add_argument("spx_pct", nargs="?", type=float, default=5.0, help="%% of capital per S&P 500 trade (default 5)")
-    parser.add_argument("qqq_pct", nargs="?", type=float, default=2.5, help="%% of capital per Nasdaq trade (default 2.5)")
+    parser.add_argument("spx_pct", nargs="?", type=float, default=5.0, help="%% of capital per S&P 500 (SXR8) trade (default 5)")
+    parser.add_argument("qqq_pct", nargs="?", type=float, default=2.5, help="%% of capital per Nasdaq (SXRV) trade (default 2.5)")
     args = parser.parse_args()
 
     size = {SPX: args.capital * args.spx_pct / 100, NDX: args.capital * args.qqq_pct / 100}
@@ -113,7 +119,7 @@ def main() -> None:
     print_legends()
 
     print(f"\n{BOLD}=== SIGNALS {datetime.now():%Y-%m-%d %H:%M} ==={RESET}  capital ${args.capital:,.0f}"
-          f" | SPY {args.spx_pct:g}% = ${size[SPX]:.2f} | QQQ {args.qqq_pct:g}% = ${size[NDX]:.2f}")
+          f" | {NAMES[SPX]} {args.spx_pct:g}% = ${size[SPX]:.2f} | {NAMES[NDX]} {args.qqq_pct:g}% = ${size[NDX]:.2f}")
 
     # --- Signals -------------------------------------------------------------
     rsi2 = {sym: rsi2_check(sym, {"close": closes[sym]}) for sym in closes}
@@ -133,21 +139,26 @@ def main() -> None:
 
     # Row label = strategy name + the format of the numbers in its cells
     label = lambda name, fmt: f"{name:<10}{DIM}{fmt:<12}{RESET}"
-    print(f"\n{'':<22}{'SPY ' + format(price[SPX], '.2f'):<22}{'QQQ ' + format(price[NDX], '.2f')}")
+    head = {sym: f"{NAMES[sym]} {INDEX[sym]} {price[sym]:.2f}" for sym in (SPX, NDX)}
+    print(f"\n{'':<22}{head[SPX]:<22}{head[NDX]}")
     print(f"{label('RSI(2)', 'now/entry')}{colored(rsi2_cell(rsi2[SPX]), 22)}{colored(rsi2_cell(rsi2[NDX]), 0)}")
     print(f"{label('MA 30/90', '30d/90d')}{colored(ma_cell(ma[SPX]), 22)}{colored(ma_cell(ma[NDX]), 0)}")
-    print(f"{label('RS', 'vs 20d avg')}{DIM}{'QQQ only':<22}{RESET}{colored(rs_cell, 0)}")
+    print(f"{label('RS', 'vs 20d avg')}{DIM}{NAMES[NDX] + ' only':<22}{RESET}{colored(rs_cell, 0)}")
+
+    def buy_line(sym: str, source: str) -> str:
+        """Stop loss as % (works on the ETF) plus the index level to log as entry_price."""
+        stop_pct = STOP_POINTS[sym] / price[sym] * 100
+        return (f"BUY  {NAMES[sym]}  ${size[sym]:.2f}  stop loss -{stop_pct:.1f}%"
+                f"  log {INDEX[sym]} {price[sym]:.2f}  ({source})")
 
     actions: list[str] = []
     for sym in (SPX, NDX):
-        stop = price[sym] - STOP_POINTS[sym]
-        buy = f"BUY  {NAMES[sym]}  ${size[sym]:.2f}  stop loss {stop:.2f}"
         if rsi2[sym]["signal"] == "BUY":
-            actions.append(f"{buy}  (RSI2 -> trades.csv)")
+            actions.append(buy_line(sym, "RSI2 -> trades.csv"))
         if ma[sym]["signal"] == "BUY":
-            actions.append(f"{buy}  (MA 30/90 -> trades_ma.csv)")
+            actions.append(buy_line(sym, "MA 30/90 -> trades_ma.csv"))
     if rs["signal"] == "BUY":
-        actions.append(f"BUY  QQQ  ${size[NDX]:.2f}  stop loss {price[NDX] - STOP_POINTS[NDX]:.2f}  (RS -> trades_rs.csv)")
+        actions.append(buy_line(NDX, "RS -> trades_rs.csv"))
 
     # --- Open positions --------------------------------------------------------
     positions = (
@@ -230,7 +241,7 @@ LEGENDS = (
         ),
     ),
     (
-        "RELATIVE STRENGTH (QQQ only)",
+        "RELATIVE STRENGTH (SXRV only)",
         (
             ("DOWNTREND", "Nasdaq/S&P ratio is below its 20-day average", "Stay out"),
             ("BUY", "Ratio crossed above its 20-day average today", "Enter"),
@@ -240,7 +251,7 @@ LEGENDS = (
             ("SELL", "Open position held 60+ trading days, whatever the ratio (see POSITIONS)", "Exit"),
         ),
         (
-            "Trades QQQ only. Ratio = Nasdaq / S&P 500, where the S&P is just the benchmark;"
+            "Trades SXRV (Nasdaq) only. Ratio = Nasdaq / S&P 500, where the S&P is just the benchmark;"
             " +1.6% means the ratio is 1.6% above its 20-day average.",
             "Golden cross (BUY): Nasdaq starts outperforming. Death cross (SELL): Nasdaq starts underperforming.",
             "Why no S&P trades: buying the S&P when it outperforms Nasdaq was backtested (2021-2026)"
