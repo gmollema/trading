@@ -43,8 +43,14 @@ def get_relative_strength_signal(ma_period: int = 20) -> dict:
         min_len = min(len(spx_data), len(ndx_data))
         spx_closes = [float(x) for x in spx_data["Close"].to_numpy().ravel()[-min_len:]]
         ndx_closes = [float(x) for x in ndx_data["Close"].to_numpy().ravel()[-min_len:]]
-        spx_dates = list(spx_data.index[-min_len:])
+        return rs_signal_from_closes(spx_closes, ndx_closes, ma_period)
 
+    except Exception as e:
+        return {"signal": "ERROR", "reason": str(e)}
+
+def rs_signal_from_closes(spx_closes: list[float], ndx_closes: list[float], ma_period: int = 20) -> dict:
+    """Compute the RS signal from date-aligned S&P 500 and Nasdaq closes."""
+    try:
         # Calculate ratio
         ratio = []
         for i in range(len(spx_closes)):
