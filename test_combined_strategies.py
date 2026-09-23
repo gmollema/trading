@@ -8,6 +8,7 @@ from trading_bot.backtest.rsi2_signals import (
     find_rsi2_long_trades, simple_moving_average, get_optimal_entry_rsi,
     get_optimal_sma, get_optimal_stop
 )
+from trading_bot.backtest.position_sizing import annual_dollars, position_size, window_years
 from trading_bot.cli.rsi2_backtest import load_bars, in_window
 
 def find_ma_trades(bars, ma_short=30, ma_long=90):
@@ -87,18 +88,13 @@ def test_symbol(symbol, label):
         wins = len([t for t in trades if t["points"] > 0])
         win_pct = (wins / len(trades) * 100) if trades else 0
         avg = net / len(trades)
-        yearly = len(trades) / 5.2
-
-        if symbol == "^GSPC":
-            dollar_per_pt = 0.111
-        else:
-            dollar_per_pt = 0.096
-
-        annual = yearly * (avg * dollar_per_pt)
+        years = window_years("2021-07-01", bars["date"][-1])
+        yearly = len(trades) / years
+        annual = annual_dollars(trades, symbol, years)
 
         print(f"{name}:")
         print(f"  Trades: {len(trades)}, Net: {net:.0f} pts, Win%: {win_pct:.0f}%, Avg: {avg:.0f} pts/trade")
-        print(f"  Annual: {yearly:.1f} trades/yr = ${annual:.0f}/yr\n")
+        print(f"  Annual: {yearly:.1f} trades/yr = ${annual:.2f}/yr at ${position_size(symbol):.2f} per trade\n")
 
         return annual
 
@@ -107,10 +103,10 @@ def test_symbol(symbol, label):
     combined_annual = calc_stats(all_trades, "COMBINED")
 
     print(f"Summary:")
-    print(f"  RSI2 alone: ${rsi2_annual:.0f}/yr")
-    print(f"  MA alone: ${ma_annual:.0f}/yr")
-    print(f"  BOTH together: ${combined_annual:.0f}/yr")
-    print(f"  Combined benefit: ${combined_annual - rsi2_annual - ma_annual:+.0f}/yr")
+    print(f"  RSI2 alone: ${rsi2_annual:.2f}/yr")
+    print(f"  MA alone: ${ma_annual:.2f}/yr")
+    print(f"  BOTH together: ${combined_annual:.2f}/yr")
+    print(f"  Combined benefit: ${combined_annual - rsi2_annual - ma_annual:+.2f}/yr")
 
 # Test both indices
 test_symbol("^GSPC", "S&P 500")

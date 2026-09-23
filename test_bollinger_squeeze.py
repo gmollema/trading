@@ -9,6 +9,7 @@ sys.path.insert(0, 'src')
 
 from pathlib import Path
 from trading_bot.backtest.rsi2_signals import simple_moving_average
+from trading_bot.backtest.position_sizing import annual_dollars, position_size, window_years
 from trading_bot.cli.rsi2_backtest import load_bars, in_window
 
 def find_bb_trades(bars):
@@ -101,18 +102,14 @@ def test_symbol(symbol, label):
     print(f"Win %: {win_pct:.1f}%")
     print(f"Avg/Trade: {avg_points:.1f} pts")
 
-    # Calculate annual profit
-    yearly_trades = len(windowed) / 5.2
-    if symbol == "^GSPC":
-        dollar_per_pt = 0.111  # $25 / 225 stop
-    else:
-        dollar_per_pt = 0.10   # $12.50 / 125 stop
+    # Calculate annual profit at the size actually bought per trade
+    years = window_years("2021-07-01", bars["date"][-1])
+    yearly_trades = len(windowed) / years
+    annual_profit = annual_dollars(windowed, symbol, years)
 
-    annual_profit = yearly_trades * (avg_points * dollar_per_pt)
-
-    print(f"\nAnnual Estimate:")
+    print(f"\nAnnual Estimate (${position_size(symbol):.2f} per trade, no costs):")
     print(f"  Trades/year: {yearly_trades:.1f}")
-    print(f"  Annual profit: ${annual_profit:.0f}/year")
+    print(f"  Annual profit: ${annual_profit:.2f}/year")
 
     return annual_profit
 
@@ -125,5 +122,5 @@ annual_sp = test_symbol("^GSPC", "S&P 500")
 annual_nd = test_symbol("^IXIC", "Nasdaq 100")
 
 print(f"\n{'='*80}")
-print(f"COMBINED ANNUAL PROFIT: ${annual_sp + annual_nd:.0f}/year")
+print(f"COMBINED ANNUAL PROFIT: ${annual_sp + annual_nd:.2f}/year")
 print(f"{'='*80}\n")

@@ -10,6 +10,7 @@ sys.path.insert(0, 'src')
 
 from pathlib import Path
 from trading_bot.backtest.rsi2_signals import simple_moving_average
+from trading_bot.backtest.position_sizing import annual_dollars, position_size, window_years
 from trading_bot.cli.rsi2_backtest import load_bars, in_window
 
 def find_relative_strength_trades(spx_closes, ndx_closes, dates, ma_period=20):
@@ -118,15 +119,14 @@ def test_relative_strength():
     if len(windowed) > 5:
         print(f"  ... and {len(windowed) - 5} more trades")
 
-    # Calculate annual profit
-    yearly_trades = len(windowed) / 5.2
-    # Nasdaq allocation: $12.50 per trade
-    dollar_per_pt = 0.10  # $12.50 / 125 stop
-    annual_profit = yearly_trades * (avg_points * dollar_per_pt)
+    # Calculate annual profit at the size actually bought per trade (Nasdaq / SXRV)
+    years = window_years("2021-07-01", ndx_dates[-1])
+    yearly_trades = len(windowed) / years
+    annual_profit = annual_dollars(windowed, "^IXIC", years)
 
-    print(f"\nAnnual Estimate:")
+    print(f"\nAnnual Estimate (${position_size('^IXIC'):.2f} per trade, no costs):")
     print(f"  Trades/year: {yearly_trades:.1f}")
-    print(f"  Annual profit: ${annual_profit:.0f}/year")
+    print(f"  Annual profit: ${annual_profit:.2f}/year")
 
     return annual_profit
 
@@ -138,9 +138,5 @@ print(f"{'='*80}")
 annual = test_relative_strength()
 
 print(f"\n{'='*80}")
-print(f"COMBINED WITH RSI2 + MA 30/90:")
-print(f"  RSI2: $121/year")
-print(f"  MA 30/90: $118/year")
-print(f"  Relative Strength: ${annual:.0f}/year")
-print(f"  TOTAL: ${121 + 118 + annual:.0f}/year")
+print(f"Relative Strength: ${annual:.2f}/year (RSI2 + MA 30/90: run test_combined_strategies.py)")
 print(f"{'='*80}\n")

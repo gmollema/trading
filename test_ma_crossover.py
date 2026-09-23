@@ -9,6 +9,7 @@ sys.path.insert(0, 'src')
 
 from pathlib import Path
 from trading_bot.backtest.rsi2_signals import simple_moving_average
+from trading_bot.backtest.position_sizing import annual_dollars, position_size, window_years
 from trading_bot.cli.rsi2_backtest import load_bars, in_window
 
 def find_ma_crossover_trades(bars, ma_short=50, ma_long=200):
@@ -84,18 +85,14 @@ def test_symbol(symbol: str, label: str):
     print(f"Avg/Trade: {avg_points:.1f} pts")
     print(f"Avg Days Held: {avg_days_held:.1f} days")
 
-    # Calculate annual profit
-    yearly_trades = len(windowed) / 5.2
-    if symbol == "^GSPC":
-        dollar_per_pt = 0.111  # $25 / 225 stop
-    else:
-        dollar_per_pt = 0.096  # $12 / 125 stop
+    # Calculate annual profit at the size actually bought per trade
+    years = window_years("2021-07-01", bars["date"][-1])
+    yearly_trades = len(windowed) / years
+    annual_profit = annual_dollars(windowed, symbol, years)
 
-    annual_profit = yearly_trades * (avg_points * dollar_per_pt)
-
-    print(f"\nAnnual Estimate:")
+    print(f"\nAnnual Estimate (${position_size(symbol):.2f} per trade, no costs):")
     print(f"  Trades/year: {yearly_trades:.1f}")
-    print(f"  Annual profit: ${annual_profit:.0f}/year")
+    print(f"  Annual profit: ${annual_profit:.2f}/year")
 
 # Test both indices
 test_symbol("^GSPC", "S&P 500")
